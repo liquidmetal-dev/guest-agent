@@ -10,7 +10,7 @@ jobs:
     timeout-minutes: 15
     env:
       CLOUD_HYPERVISOR_VERSION: v52.0
-      E2E_ARTIFACT_DIR: ./_guest-agent-e2e
+      E2E_ARTIFACT_DIR: _guest-agent-e2e
 
     steps:
       - name: Checkout
@@ -66,6 +66,14 @@ jobs:
           ls -l /dev/kvm
           test -r /dev/kvm
           test -w /dev/kvm
+
+      - name: Make kernel readable
+        run: |
+          # linux-image-kvm installs /boot/vmlinuz-* as root-only (0600).
+          # Cloud Hypervisor runs as the runner user and must read the kernel.
+          ls -l /boot/vmlinuz-* || true
+          sudo chmod 0644 /boot/vmlinuz-*
+          ls -l /boot/vmlinuz-*
 
       - name: Unit tests
         run: make test
