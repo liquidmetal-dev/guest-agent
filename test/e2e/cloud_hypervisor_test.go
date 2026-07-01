@@ -49,7 +49,7 @@ func TestCloudHypervisorAgentE2E(t *testing.T) {
 	requireReadableWritableKVM(t)
 
 	initramfs := filepath.Join(work, "initramfs.cpio.gz")
-	buildInitramfs(t, work, initramfs, busybox, guestAgent, echoServer)
+	buildInitramfs(t, work, initramfs, busybox, guestAgent, echoServer, kernel)
 
 	vsockPath := filepath.Join(work, "agent.vsock")
 	serialLog := filepath.Join(logDir, "serial.log")
@@ -225,7 +225,7 @@ func requireReadableWritableKVM(t *testing.T) {
 	_ = f.Close()
 }
 
-func buildInitramfs(t *testing.T, work, out, busybox, guestAgent, echoServer string) {
+func buildInitramfs(t *testing.T, work, out, busybox, guestAgent, echoServer, kernel string) {
 	t.Helper()
 	root := filepath.Join(work, "rootfs")
 	for _, dir := range []string{"bin", "dev", "proc", "sys", "tmp", "usr/local/bin"} {
@@ -236,9 +236,15 @@ func buildInitramfs(t *testing.T, work, out, busybox, guestAgent, echoServer str
 	copyFile(t, guestAgent, filepath.Join(root, "usr/local/bin", "guest-agent"), 0o755)
 	copyFile(t, echoServer, filepath.Join(root, "usr/local/bin", "echo-server"), 0o755)
 
-	for _, applet := range []string{"sh", "cat", "echo", "sleep", "false", "uname", "id", "tee", "mount"} {
+	for _, applet := range []string{"sh", "cat", "echo", "sleep", "false", "uname", "id", "tee", "mount", "insmod"} {
 		must(t, os.Symlink("busybox", filepath.Join(root, "bin", applet)))
 	}
+
+	// The guest agent binds a vsock listener, which requires /dev/vsock. On the
+	// distro kernel (linux-image-*), the vsock transport is a loadable module, so
+	// stage those modules into the initramfs and insmod them from init. Without
+	// this /dev/vsock never appears and the agent exits before binding its port.
+	vsockMods := stageVsockModules(t, kernel, root)
 
 	init := `#!/bin/sh
 set -eu
@@ -246,12 +252,106 @@ export PATH=/bin:/usr/bin:/usr/local/bin
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev || true
+for m in ` + strings.Join(vsockMods, " ") + `; do
+	if [ -f /lib/modules/$m.ko ]; then
+		insmod /lib/modules/$m.ko || echo "init: insmod $m failed"
+	fi
+done
 /usr/local/bin/echo-server >/tmp/echo-server.log 2>&1 &
 /usr/local/bin/guest-agent --ssh-target 127.0.0.1:2222 --log-level debug >/tmp/guest-agent.log 2>&1 &
 while true; do sleep 3600; done
 `
 	must(t, os.WriteFile(filepath.Join(root, "init"), []byte(init), 0o755))
 	writeCPIOGzip(t, root, out)
+}
+
+// stageVsockModules copies the virtio-vsock kernel modules for the given kernel
+// into <root>/lib/modules, decompressing them if the distro ships compressed
+// modules (Ubuntu uses .ko.zst). It returns the module names, in load order, that
+// were actually staged. If a module isn't found it's assumed built-in and skipped.
+func stageVsockModules(t *testing.T, kernel, root string) []string {
+	t.Helper()
+	release := strings.TrimPrefix(filepath.Base(kernel), "vmlinuz-")
+	modRoot := filepath.Join("/lib/modules", release, "kernel", "net", "vmw_vsock")
+	dstDir := filepath.Join(root, "lib", "modules")
+	must(t, os.MkdirAll(dstDir, 0o755))
+
+	// Load order: core, then the common transport, then the virtio transport.
+	order := []string{"vsock", "vmw_vsock_virtio_transport_common", "vmw_vsock_virtio_transport"}
+	var staged []string
+	for _, m := range order {
+		matches, err := filepath.Glob(filepath.Join(modRoot, m+".ko*"))
+		if err != nil {
+			t.Fatalf("glob module %s: %v", m, err)
+		}
+		if len(matches) == 0 {
+			t.Logf("vsock module %s not found under %s (assuming built-in)", m, modRoot)
+			continue
+		}
+		decompressModule(t, matches[0], filepath.Join(dstDir, m+".ko"))
+		staged = append(staged, m)
+	}
+	if len(staged) == 0 {
+		t.Logf("no vsock modules staged for %s; assuming vsock is built into the kernel", release)
+	}
+	return staged
+}
+
+// decompressModule writes src to dst, decompressing by extension. Ubuntu ships
+// kernel modules as .ko.zst; .ko.xz and .ko.gz are also handled, and a plain .ko
+// is copied through.
+func decompressModule(t *testing.T, src, dst string) {
+	t.Helper()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("create %s: %v", dst, err)
+	}
+	defer func() {
+		if cerr := out.Close(); cerr != nil {
+			t.Fatalf("close %s: %v", dst, cerr)
+		}
+	}()
+
+	switch {
+	case strings.HasSuffix(src, ".zst"):
+		decompressWith(t, out, "zstd", "-d", "-c", src)
+	case strings.HasSuffix(src, ".xz"):
+		decompressWith(t, out, "xz", "-d", "-c", src)
+	case strings.HasSuffix(src, ".gz"):
+		in, err := os.Open(src)
+		if err != nil {
+			t.Fatalf("open %s: %v", src, err)
+		}
+		defer in.Close()
+		gz, err := gzip.NewReader(in)
+		if err != nil {
+			t.Fatalf("gunzip %s: %v", src, err)
+		}
+		if _, err := io.Copy(out, gz); err != nil {
+			t.Fatalf("decompress %s: %v", src, err)
+		}
+	default:
+		in, err := os.Open(src)
+		if err != nil {
+			t.Fatalf("open %s: %v", src, err)
+		}
+		defer in.Close()
+		if _, err := io.Copy(out, in); err != nil {
+			t.Fatalf("copy %s: %v", src, err)
+		}
+	}
+}
+
+// decompressWith runs a decompressor and streams its stdout into out.
+func decompressWith(t *testing.T, out io.Writer, name string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	var stderr bytes.Buffer
+	cmd.Stdout = out
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("%s %s: %v\n%s", name, strings.Join(args, " "), err, stderr.Bytes())
+	}
 }
 
 func copyFile(t *testing.T, src, dst string, mode os.FileMode) {

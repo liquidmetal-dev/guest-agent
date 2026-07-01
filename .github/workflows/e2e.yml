@@ -47,7 +47,9 @@ jobs:
             curl \
             gzip \
             jq \
-            linux-image-kvm
+            linux-image-kvm \
+            xz-utils \
+            zstd
 
       - name: Install Cloud Hypervisor
         run: |
