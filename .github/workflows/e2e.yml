@@ -1,0 +1,65 @@
+name: e2e
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  cloud-hypervisor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLOUD_HYPERVISOR_VERSION: v52.0
+      E2E_ARTIFACT_DIR: ${{ runner.temp }}/guest-agent-e2e
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            acl \
+            busybox-static \
+            ca-certificates \
+            cpio \
+            curl \
+            gzip \
+            jq \
+            linux-image-kvm
+
+      - name: Install Cloud Hypervisor
+        run: |
+          curl -fsSL \
+            "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CLOUD_HYPERVISOR_VERSION}/cloud-hypervisor-static" \
+            -o cloud-hypervisor
+          chmod +x cloud-hypervisor
+          sudo install -m 0755 cloud-hypervisor /usr/local/bin/cloud-hypervisor
+          cloud-hypervisor --version
+
+      - name: Configure KVM access
+        run: |
+          test -e /dev/kvm
+          sudo setfacl -m "u:${USER}:rw" /dev/kvm
+          test -r /dev/kvm
+          test -w /dev/kvm
+
+      - name: Unit tests
+        run: make test
+
+      - name: Cloud Hypervisor e2e
+        run: make e2e
+
+      - name: Upload e2e logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-hypervisor-e2e-logs
+          path: ${{ env.E2E_ARTIFACT_DIR }}
+          if-no-files-found: ignore
