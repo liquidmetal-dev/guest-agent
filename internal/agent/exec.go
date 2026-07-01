@@ -190,12 +190,14 @@ func (a *Agent) readLoop(conn net.Conn, stdin io.WriteCloser, cancel context.Can
 		case protocol.FrameStdin:
 			if stdin != nil {
 				if _, werr := stdin.Write(f.Payload); werr != nil {
-					return
+					stdin.Close()
+					stdin = nil
 				}
 			}
 		case protocol.FrameStdinEOF:
 			if stdin != nil {
 				stdin.Close()
+				stdin = nil
 			}
 		}
 	}

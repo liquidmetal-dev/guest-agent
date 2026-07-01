@@ -28,7 +28,11 @@ fmt:
 	gofmt -w cmd internal
 
 lint: vet
-	gofmt -l cmd internal
+	@files="$$(gofmt -l cmd internal)"; \
+	if [ -n "$$files" ]; then \
+		printf '%s\n' "$$files"; \
+		exit 1; \
+	fi
 
 # Static multi-arch release builds.
 release:

@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -111,6 +113,43 @@ func TestExecStdinStreaming(t *testing.T) {
 	}
 	if res.code != 0 {
 		t.Errorf("code = %d, want 0", res.code)
+	}
+}
+
+type failingWriteCloser struct{}
+
+func (failingWriteCloser) Write([]byte) (int, error) {
+	return 0, errors.New("stdin closed")
+}
+
+func (failingWriteCloser) Close() error { return nil }
+
+func TestReadLoopKeepsDisconnectDetectionAfterStdinWriteError(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+
+	cancelled := make(chan struct{})
+	var once sync.Once
+	cancel := func() {
+		once.Do(func() { close(cancelled) })
+	}
+
+	go New(Config{}).readLoop(server, failingWriteCloser{}, cancel)
+
+	if err := protocol.WriteFrame(client, protocol.FrameStdin, []byte("ignored")); err != nil {
+		t.Fatalf("write stdin frame: %v", err)
+	}
+	select {
+	case <-cancelled:
+		t.Fatal("readLoop cancelled on stdin write error; want it to keep reading")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	client.Close()
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("readLoop did not cancel after host disconnect")
 	}
 }
 
