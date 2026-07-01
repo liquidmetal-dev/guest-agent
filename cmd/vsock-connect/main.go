@@ -19,6 +19,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/liquidmetal-dev/guest-agent/internal/protocol"
@@ -77,32 +78,59 @@ type connFlags struct {
 
 // parseConn pulls connection flags out of args, leaving the rest. It is a tiny
 // hand-rolled parser so it can coexist with a "--" argv terminator.
-func parseConn(args []string) (connFlags, []string) {
+func parseConn(args []string) (connFlags, []string, error) {
 	var c connFlags
 	var rest []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--":
+			rest = append(rest, args[i:]...)
+			return c, rest, nil
 		case "--uds":
 			i++
-			c.uds = arg(args, i)
+			v, err := arg(args, i)
+			if err != nil {
+				return c, nil, err
+			}
+			c.uds = v
 		case "--port":
 			i++
-			fmt.Sscanf(arg(args, i), "%d", &c.port)
+			v, err := arg(args, i)
+			if err != nil {
+				return c, nil, err
+			}
+			port, err := parseUintFlag("--port", v)
+			if err != nil {
+				return c, nil, err
+			}
+			c.port = port
 		case "--tcp":
 			i++
-			c.tcp = arg(args, i)
+			v, err := arg(args, i)
+			if err != nil {
+				return c, nil, err
+			}
+			c.tcp = v
 		default:
 			rest = append(rest, args[i])
 		}
 	}
-	return c, rest
+	return c, rest, nil
 }
 
-func arg(args []string, i int) string {
+func arg(args []string, i int) (string, error) {
 	if i >= len(args) {
-		fatal("missing value for flag %q", args[i-1])
+		return "", fmt.Errorf("missing value for flag %q", args[i-1])
 	}
-	return args[i]
+	return args[i], nil
+}
+
+func parseUintFlag(name, value string) (uint, error) {
+	n, err := strconv.ParseUint(value, 10, 32)
+	if err != nil || n == 0 {
+		return 0, fmt.Errorf("invalid %s %q", name, value)
+	}
+	return uint(n), nil
 }
 
 // dial connects per the connection flags, performing the UDS handshake when
@@ -148,7 +176,10 @@ func (b *bufConn) Read(p []byte) (int, error) { return b.r.Read(p) }
 
 // cmdRaw pipes stdio to/from the socket. Used as an ssh ProxyCommand.
 func cmdRaw(args []string) {
-	c, rest := parseConn(args)
+	c, rest, err := parseConn(args)
+	if err != nil {
+		fatal("%v", err)
+	}
 	if len(rest) > 0 {
 		fatal("unexpected args: %v", rest)
 	}
@@ -162,32 +193,14 @@ func cmdRaw(args []string) {
 
 // cmdExec runs a command on the guest and mirrors its I/O and exit code.
 func cmdExec(args []string) {
-	c, rest := parseConn(args)
-	e := &protocol.Exec{}
-	var argv []string
-	for i := 0; i < len(rest); i++ {
-		switch rest[i] {
-		case "--shell":
-			e.Shell = true
-		case "--stdin":
-			e.HasStdin = true
-		case "--user":
-			i++
-			e.User = arg(rest, i)
-		case "--timeout":
-			i++
-			fmt.Sscanf(arg(rest, i), "%d", &e.TimeoutSec)
-		case "--":
-			argv = rest[i+1:]
-			i = len(rest)
-		default:
-			fatal("unknown exec option %q (did you forget \"--\" before the command?)", rest[i])
-		}
+	c, rest, err := parseConn(args)
+	if err != nil {
+		fatal("%v", err)
 	}
-	if len(argv) == 0 {
-		fatal("no command given; use: exec [opts] -- CMD [ARGS...]")
+	e, err := parseExec(rest)
+	if err != nil {
+		fatal("%v", err)
 	}
-	e.Cmd, e.Args = argv[0], argv[1:]
 
 	conn := dial(c)
 	defer conn.Close()
@@ -202,9 +215,53 @@ func cmdExec(args []string) {
 	os.Exit(readResponses(conn, false))
 }
 
+func parseExec(args []string) (*protocol.Exec, error) {
+	e := &protocol.Exec{}
+	var argv []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--shell":
+			e.Shell = true
+		case "--stdin":
+			e.HasStdin = true
+		case "--user":
+			i++
+			v, err := arg(args, i)
+			if err != nil {
+				return nil, err
+			}
+			e.User = v
+		case "--timeout":
+			i++
+			v, err := arg(args, i)
+			if err != nil {
+				return nil, err
+			}
+			timeout, err := strconv.Atoi(v)
+			if err != nil || timeout < 0 {
+				return nil, fmt.Errorf("invalid --timeout %q", v)
+			}
+			e.TimeoutSec = timeout
+		case "--":
+			argv = args[i+1:]
+			i = len(args)
+		default:
+			return nil, fmt.Errorf("unknown exec option %q (did you forget \"--\" before the command?)", args[i])
+		}
+	}
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("no command given; use: exec [opts] -- CMD [ARGS...]")
+	}
+	e.Cmd, e.Args = argv[0], argv[1:]
+	return e, nil
+}
+
 // cmdSimple runs a no-payload op (ping/info) and reports the result.
 func cmdSimple(args []string, op protocol.Op) {
-	c, rest := parseConn(args)
+	c, rest, err := parseConn(args)
+	if err != nil {
+		fatal("%v", err)
+	}
 	if len(rest) > 0 {
 		fatal("unexpected args: %v", rest)
 	}
