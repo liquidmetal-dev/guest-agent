@@ -21,9 +21,14 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/liquidmetal-dev/guest-agent/internal/protocol"
 )
+
+// handshakeTimeout bounds the UDS CONNECT handshake so a not-yet-ready (or
+// never-ready) guest agent fails fast instead of blocking forever.
+const handshakeTimeout = 10 * time.Second
 
 func main() {
 	if len(os.Args) < 2 {
@@ -147,10 +152,12 @@ func dial(c connFlags) net.Conn {
 	if c.uds == "" || c.port == 0 {
 		fatal("need --uds PATH --port N (or --tcp HOST:PORT)")
 	}
-	conn, err := net.Dial("unix", c.uds)
+	conn, err := net.DialTimeout("unix", c.uds, handshakeTimeout)
 	if err != nil {
 		fatal("dial uds %s: %v", c.uds, err)
 	}
+	// Bound the handshake, then clear the deadline so streaming isn't affected.
+	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	if _, err := fmt.Fprintf(conn, "CONNECT %d\n", c.port); err != nil {
 		fatal("handshake write: %v", err)
 	}
@@ -162,6 +169,7 @@ func dial(c connFlags) net.Conn {
 	if !strings.HasPrefix(line, "OK") {
 		fatal("handshake rejected: %q", strings.TrimSpace(line))
 	}
+	_ = conn.SetDeadline(time.Time{})
 	return &bufConn{Conn: conn, r: r}
 }
 
