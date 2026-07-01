@@ -1,0 +1,22 @@
+version: "2"
+
+linters:
+  default: standard
+  disable:
+    # Existing code ignores many Close()/WriteError() returns; enabling errcheck
+    # would fail CI on pre-existing code. Re-enable once those are handled.
+    - errcheck
+  enable:
+    - misspell
+  exclusions:
+    rules:
+      # Pre-existing De Morgan simplification in a table-test guard; not worth
+      # churning test code over.
+      - path: internal/protocol/frame_test.go
+        linters:
+          - staticcheck
+        text: "QF1001"
+
+formatters:
+  enable:
+    - gofmt
