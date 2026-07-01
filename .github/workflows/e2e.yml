@@ -16,6 +16,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Diagnose runner virtualization
+        run: |
+          echo "runner.os=${{ runner.os }}"
+          echo "runner.arch=${{ runner.arch }}"
+          uname -a
+          id
+          groups
+          lscpu
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm is required for the Cloud Hypervisor e2e test but is not present on this runner"
+            ls -la /dev
+            exit 1
+          fi
+          ls -l /dev/kvm
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -45,8 +60,10 @@ jobs:
 
       - name: Configure KVM access
         run: |
+          ls -l /dev/kvm
           test -e /dev/kvm
           sudo setfacl -m "u:${USER}:rw" /dev/kvm
+          ls -l /dev/kvm
           test -r /dev/kvm
           test -w /dev/kvm
 
