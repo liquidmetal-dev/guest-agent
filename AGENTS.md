@@ -56,4 +56,7 @@ make vet            # go vet ./...
 
 - `.github/workflows/ci.yml` — runs on PRs: `build`, `lint`, `test` jobs.
 - `.github/workflows/e2e.yml` — runs the Cloud Hypervisor e2e test on PRs.
+- `.github/workflows/release.yml` — on `v*` tag push, runs GoReleaser
+  (`.goreleaser.yaml`) to publish archives, `.deb`/`.rpm`, checksums, and a changelog
+  to the GitHub Release. Keep its `setup-go` version in sync with `go.mod` too.
 - Dependency updates: `.github/dependabot.yml` (weekly, grouped per ecosystem).

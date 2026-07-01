@@ -39,6 +39,23 @@ make release    # linux/amd64 + linux/arm64 static binaries
 make test
 ```
 
+## Releases
+
+Tagged releases (`vX.Y.Z`) publish to
+[GitHub Releases](https://github.com/liquidmetal-dev/guest-agent/releases) via GoReleaser:
+
+- `.tar.gz` archives of `guest-agent` and `vsock-connect` for `linux/amd64` and `linux/arm64`;
+- `.deb` and `.rpm` packages for `guest-agent` (installs the binary to `/usr/local/bin` and
+  the systemd unit to `/lib/systemd/system/`; enable with `systemctl enable --now guest-agent`);
+- `checksums.txt` and an auto-generated changelog.
+
+```sh
+# Debian/Ubuntu
+sudo dpkg -i guest-agent_<version>_linux_amd64.deb
+# RHEL/Fedora
+sudo rpm -i guest-agent_<version>_linux_amd64.rpm
+```
+
 ## Quickstart (dev, no VM)
 
 ```sh

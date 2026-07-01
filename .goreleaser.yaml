@@ -1,0 +1,117 @@
+# GoReleaser config — https://goreleaser.com
+# Builds static linux amd64/arm64 binaries, packages guest-agent as deb/rpm,
+# and publishes archives + checksums + changelog to the GitHub Release.
+version: 2
+
+project_name: guest-agent
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: guest-agent
+    main: ./cmd/guest-agent
+    binary: guest-agent
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    # Mirrors Makefile LDFLAGS. Version var lives in internal/agent, not main.
+    ldflags:
+      - -s -w -X github.com/liquidmetal-dev/guest-agent/internal/agent.Version={{ .Version }}
+
+  - id: vsock-connect
+    main: ./cmd/vsock-connect
+    binary: vsock-connect
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/liquidmetal-dev/guest-agent/internal/agent.Version={{ .Version }}
+
+archives:
+  - id: guest-agent
+    ids:
+      - guest-agent
+    formats:
+      - tar.gz
+    name_template: "guest-agent_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - init/guest-agent.service
+      - docs/host-usage.md
+
+  - id: vsock-connect
+    ids:
+      - vsock-connect
+    formats:
+      - tar.gz
+    name_template: "vsock-connect_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - docs/host-usage.md
+
+nfpms:
+  - id: guest-agent
+    package_name: guest-agent
+    ids:
+      - guest-agent
+    formats:
+      - deb
+      - rpm
+    maintainer: LiquidMetal <noreply@liquidmetal.dev>
+    description: LiquidMetal guest-agent (vsock host control + ssh proxy).
+    license: MIT
+    homepage: https://github.com/liquidmetal-dev/guest-agent
+    vendor: LiquidMetal
+    # Match ExecStart in init/guest-agent.service (/usr/local/bin/guest-agent).
+    bindir: /usr/local/bin
+    contents:
+      - src: init/guest-agent.service
+        dst: /lib/systemd/system/guest-agent.service
+        type: config
+    # Install only — no scriptlets. User runs `systemctl enable guest-agent`.
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: git
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - '^chore:'
+      - '^build:'
+      - '^style:'
+      - '^refactor:'
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: liquidmetal-dev
+    name: guest-agent
+  draft: false
+  prerelease: auto
