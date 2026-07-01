@@ -153,7 +153,11 @@ func workDir(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("create artifact dir: %v", err)
 	}
-	return dir
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatalf("resolve artifact dir: %v", err)
+	}
+	return abs
 }
 
 func repoRoot(t *testing.T) string {
