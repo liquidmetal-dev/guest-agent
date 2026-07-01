@@ -238,6 +238,7 @@ func buildInitramfs(t *testing.T, work, out, busybox, guestAgent, echoServer str
 
 	init := `#!/bin/sh
 set -eu
+export PATH=/bin:/usr/bin:/usr/local/bin
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev || true
@@ -355,6 +356,9 @@ func waitForAgent(t *testing.T, vsockConnect, vsockPath string) {
 	var last commandResult
 	for time.Now().Before(deadline) {
 		last = runVsockAllowExitNoFatal(vsockConnect, nil, "ping", "--uds", vsockPath, "--port", controlPort)
+		if last.code < 0 {
+			t.Fatalf("could not execute vsock-connect readiness probe\nstdout=%s\nstderr=%s", last.stdout, last.stderr)
+		}
 		if last.code == 0 {
 			return
 		}
@@ -388,6 +392,10 @@ func runVsockAllowExitNoFatal(bin string, stdin []byte, args ...string) commandR
 	code := 0
 	if err := cmd.Run(); err != nil {
 		code = exitCode(err)
+		if code < 0 {
+			stderr.WriteString(err.Error())
+			stderr.WriteByte('\n')
+		}
 	}
 	return commandResult{stdout: stdout.Bytes(), stderr: stderr.Bytes(), code: code}
 }

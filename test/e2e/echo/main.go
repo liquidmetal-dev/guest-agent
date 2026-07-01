@@ -18,9 +18,9 @@ func main() {
 		if err != nil {
 			log.Fatalf("accept: %v", err)
 		}
-		go func() {
+		go func(c net.Conn) {
 			defer c.Close()
 			_, _ = io.Copy(c, c)
-		}()
+		}(c)
 	}
 }
