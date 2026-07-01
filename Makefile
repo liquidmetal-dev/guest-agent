@@ -5,7 +5,7 @@ GOFLAGS := CGO_ENABLED=0
 BINDIR := bin
 PLATFORMS := linux/amd64 linux/arm64
 
-.PHONY: all build host test vet fmt lint clean release
+.PHONY: all build host test e2e vet fmt lint clean release
 
 all: build
 
@@ -20,6 +20,9 @@ host:
 
 test:
 	go test ./...
+
+e2e:
+	go test -tags e2e ./test/e2e -run TestCloudHypervisorAgentE2E -timeout 3m -v
 
 vet:
 	go vet ./...
