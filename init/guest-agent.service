@@ -1,0 +1,18 @@
+[Unit]
+Description=LiquidMetal guest-agent (vsock host control + ssh proxy)
+Documentation=https://github.com/liquidmetal-dev/guest-agent
+After=network.target sshd.service
+Wants=sshd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/guest-agent
+Restart=always
+RestartSec=2
+# Defaults: --net vsock --control-port 1024 --ssh-port 1025 --ssh-target 127.0.0.1:22
+# Override via flags above or GA_* environment, e.g.:
+#   Environment=GA_LOG_FORMAT=json
+#   Environment=GA_SSH_TARGET=127.0.0.1:22
+
+[Install]
+WantedBy=multi-user.target
