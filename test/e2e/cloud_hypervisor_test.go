@@ -236,7 +236,7 @@ func buildInitramfs(t *testing.T, work, out, busybox, guestAgent, echoServer, ke
 	copyFile(t, guestAgent, filepath.Join(root, "usr/local/bin", "guest-agent"), 0o755)
 	copyFile(t, echoServer, filepath.Join(root, "usr/local/bin", "echo-server"), 0o755)
 
-	for _, applet := range []string{"sh", "cat", "echo", "sleep", "false", "uname", "id", "tee", "mount", "insmod"} {
+	for _, applet := range []string{"sh", "cat", "echo", "sleep", "false", "uname", "id", "tee", "mount", "insmod", "ip", "ifconfig"} {
 		must(t, os.Symlink("busybox", filepath.Join(root, "bin", applet)))
 	}
 
@@ -252,6 +252,8 @@ export PATH=/bin:/usr/bin:/usr/local/bin
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev || true
+# Bring up loopback so the ssh proxy can reach the echo server on 127.0.0.1.
+ip link set lo up 2>/dev/null || ifconfig lo up 2>/dev/null || true
 for m in ` + strings.Join(vsockMods, " ") + `; do
 	if [ -f /lib/modules/$m.ko ]; then
 		insmod /lib/modules/$m.ko || echo "init: insmod $m failed"
