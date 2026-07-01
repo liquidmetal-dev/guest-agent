@@ -10,7 +10,7 @@ jobs:
     timeout-minutes: 15
     env:
       CLOUD_HYPERVISOR_VERSION: v52.0
-      E2E_ARTIFACT_DIR: ${{ runner.temp }}/guest-agent-e2e
+      E2E_ARTIFACT_DIR: ./_guest-agent-e2e
 
     steps:
       - name: Checkout
