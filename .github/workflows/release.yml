@@ -39,18 +39,8 @@ jobs:
           token: ${{ secrets.APT_REPO_TOKEN }}
           path: apt-repo
 
-      - name: Install apt repository tools
+      - name: Add apt repository artifacts
         if: ${{ !contains(github.ref_name, '-') }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y apt-utils dpkg-dev gnupg
-
-      - name: Publish apt repository
-        if: ${{ !contains(github.ref_name, '-') }}
-        env:
-          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
-          APT_GPG_KEY_ID: ${{ secrets.APT_GPG_KEY_ID }}
         run: |
           if ! [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Skipping apt publish for non-stable tag: ${GITHUB_REF_NAME}"
@@ -60,9 +50,31 @@ jobs:
           git -C apt-repo config user.name "github-actions[bot]"
           git -C apt-repo config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          export GNUPGHOME="${RUNNER_TEMP}/apt-gpg"
-          mkdir -p "${GNUPGHOME}"
-          chmod 700 "${GNUPGHOME}"
-          printf '%s' "${APT_GPG_PRIVATE_KEY}" | gpg --batch --import
+          shopt -s nullglob
+          debs=(dist/*.deb)
+          shopt -u nullglob
+          if [ "${#debs[@]}" -eq 0 ]; then
+            echo "no .deb artifacts found in dist" >&2
+            exit 1
+          fi
 
-          scripts/publish-apt-repo.sh dist apt-repo
+          incoming_dir="apt-repo/incoming/guest-agent/${GITHUB_REF_NAME}"
+          mkdir -p "${incoming_dir}"
+
+          for deb in "${debs[@]}"; do
+            dest="${incoming_dir}/$(basename "${deb}")"
+            if [ -e "${dest}" ] && ! cmp -s "${deb}" "${dest}"; then
+              echo "refusing to replace existing incoming package with different bytes: ${dest}" >&2
+              exit 1
+            fi
+            cp "${deb}" "${dest}"
+          done
+
+          git -C apt-repo add "incoming/guest-agent/${GITHUB_REF_NAME}"
+          if git -C apt-repo diff --cached --quiet; then
+            echo "apt repository incoming files already up to date"
+            exit 0
+          fi
+
+          git -C apt-repo commit -m "Add guest-agent ${GITHUB_REF_NAME} apt artifacts"
+          git -C apt-repo push
