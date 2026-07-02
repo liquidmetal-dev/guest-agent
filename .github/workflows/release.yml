@@ -39,9 +39,11 @@ jobs:
           token: ${{ secrets.APT_REPO_TOKEN }}
           path: apt-repo
 
-      - name: Add apt repository artifacts
+      - name: Deposit apt repository artifacts
         if: ${{ !contains(github.ref_name, '-') }}
         run: |
+          # The apt-repo repository owns metadata generation and signing. Pushing
+          # incoming artifacts triggers its publish workflow.
           if ! [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Skipping apt publish for non-stable tag: ${GITHUB_REF_NAME}"
             exit 0
@@ -78,3 +80,4 @@ jobs:
 
           git -C apt-repo commit -m "Add guest-agent ${GITHUB_REF_NAME} apt artifacts"
           git -C apt-repo push
+          echo "Published incoming artifacts. liquidmetal-dev/apt-repo will generate, sign, and publish the apt repository."
