@@ -49,6 +49,9 @@ Tagged releases (`vX.Y.Z`) publish to
   the systemd unit to `/lib/systemd/system/`; enable with `systemctl enable --now guest-agent`);
 - `checksums.txt` and an auto-generated changelog.
 
+Debian/Ubuntu users can also install `guest-agent` from the signed
+[LiquidMetal apt repository](https://github.com/liquidmetal-dev/apt-repo).
+
 ```sh
 # Debian/Ubuntu
 sudo dpkg -i guest-agent_<version>_linux_amd64.deb
