@@ -30,3 +30,54 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Checkout apt repository
+        if: ${{ !contains(github.ref_name, '-') }}
+        uses: actions/checkout@v7
+        with:
+          repository: liquidmetal-dev/apt-repo
+          token: ${{ secrets.APT_REPO_TOKEN }}
+          path: apt-repo
+
+      - name: Deposit apt repository artifacts
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          # The apt-repo repository owns metadata generation and signing. Pushing
+          # incoming artifacts triggers its publish workflow.
+          if ! [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Skipping apt publish for non-stable tag: ${GITHUB_REF_NAME}"
+            exit 0
+          fi
+
+          git -C apt-repo config user.name "github-actions[bot]"
+          git -C apt-repo config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          shopt -s nullglob
+          debs=(dist/*.deb)
+          shopt -u nullglob
+          if [ "${#debs[@]}" -eq 0 ]; then
+            echo "no .deb artifacts found in dist" >&2
+            exit 1
+          fi
+
+          incoming_dir="apt-repo/incoming/guest-agent/${GITHUB_REF_NAME}"
+          mkdir -p "${incoming_dir}"
+
+          for deb in "${debs[@]}"; do
+            dest="${incoming_dir}/$(basename "${deb}")"
+            if [ -e "${dest}" ] && ! cmp -s "${deb}" "${dest}"; then
+              echo "refusing to replace existing incoming package with different bytes: ${dest}" >&2
+              exit 1
+            fi
+            cp "${deb}" "${dest}"
+          done
+
+          git -C apt-repo add "incoming/guest-agent/${GITHUB_REF_NAME}"
+          if git -C apt-repo diff --cached --quiet; then
+            echo "apt repository incoming files already up to date"
+            exit 0
+          fi
+
+          git -C apt-repo commit -m "Add guest-agent ${GITHUB_REF_NAME} apt artifacts"
+          git -C apt-repo push
+          echo "Published incoming artifacts. liquidmetal-dev/apt-repo will generate, sign, and publish the apt repository."

@@ -49,6 +49,21 @@ Tagged releases (`vX.Y.Z`) publish to
   the systemd unit to `/lib/systemd/system/`; enable with `systemctl enable --now guest-agent`);
 - `checksums.txt` and an auto-generated changelog.
 
+Debian/Ubuntu users can also install `guest-agent` from the signed LiquidMetal
+apt repository:
+
+```sh
+sudo install -d -m 0755 /usr/share/keyrings
+curl -fsSL https://liquidmetal-dev.github.io/apt-repo/liquidmetal-archive-keyring.asc \
+  | sudo gpg --dearmor -o /usr/share/keyrings/liquidmetal-archive-keyring.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/liquidmetal-archive-keyring.gpg] https://liquidmetal-dev.github.io/apt-repo stable main" \
+  | sudo tee /etc/apt/sources.list.d/liquidmetal.list >/dev/null
+
+sudo apt-get update
+sudo apt-get install guest-agent
+```
+
 ```sh
 # Debian/Ubuntu
 sudo dpkg -i guest-agent_<version>_linux_amd64.deb
