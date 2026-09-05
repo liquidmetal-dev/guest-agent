@@ -13,22 +13,16 @@
 package main
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"strconv"
-	"strings"
-	"time"
 
-	"github.com/liquidmetal-dev/guest-agent/internal/protocol"
+	"github.com/liquidmetal-dev/guest-agent/pkg/vsockclient"
 )
-
-// handshakeTimeout bounds the UDS CONNECT handshake so a not-yet-ready (or
-// never-ready) guest agent fails fast instead of blocking forever.
-const handshakeTimeout = 10 * time.Second
 
 func main() {
 	if len(os.Args) < 2 {
@@ -38,9 +32,9 @@ func main() {
 	case "exec":
 		cmdExec(os.Args[2:])
 	case "ping":
-		cmdSimple(os.Args[2:], protocol.OpPing)
+		cmdSimple(os.Args[2:], vsockclient.OpPing)
 	case "info":
-		cmdSimple(os.Args[2:], protocol.OpInfo)
+		cmdSimple(os.Args[2:], vsockclient.OpInfo)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -140,47 +134,25 @@ func parseUintFlag(name, value string) (uint, error) {
 
 // dial connects per the connection flags, performing the UDS handshake when
 // needed, and returns a conn whose Read includes any bytes buffered during the
-// handshake.
+// handshake. The handshake and framing logic lives in pkg/vsockclient, shared
+// with any other Go caller of the guest-agent (e.g. flintlock).
 func dial(c connFlags) net.Conn {
 	if c.tcp != "" {
-		conn, err := net.Dial("tcp", c.tcp)
+		conn, err := vsockclient.DialTCP(context.Background(), c.tcp)
 		if err != nil {
-			fatal("dial tcp %s: %v", c.tcp, err)
+			fatal("%v", err)
 		}
 		return conn
 	}
 	if c.uds == "" || c.port == 0 {
 		fatal("need --uds PATH --port N (or --tcp HOST:PORT)")
 	}
-	conn, err := net.DialTimeout("unix", c.uds, handshakeTimeout)
+	conn, err := vsockclient.Dial(context.Background(), c.uds, uint32(c.port))
 	if err != nil {
-		fatal("dial uds %s: %v", c.uds, err)
+		fatal("%v", err)
 	}
-	// Bound the handshake, then clear the deadline so streaming isn't affected.
-	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
-	if _, err := fmt.Fprintf(conn, "CONNECT %d\n", c.port); err != nil {
-		fatal("handshake write: %v", err)
-	}
-	r := bufio.NewReader(conn)
-	line, err := r.ReadString('\n')
-	if err != nil {
-		fatal("handshake read: %v", err)
-	}
-	if !strings.HasPrefix(line, "OK") {
-		fatal("handshake rejected: %q", strings.TrimSpace(line))
-	}
-	_ = conn.SetDeadline(time.Time{})
-	return &bufConn{Conn: conn, r: r}
+	return conn
 }
-
-// bufConn reads through a bufio.Reader (carrying post-handshake bytes) while
-// writing straight to the underlying conn.
-type bufConn struct {
-	net.Conn
-	r *bufio.Reader
-}
-
-func (b *bufConn) Read(p []byte) (int, error) { return b.r.Read(p) }
 
 // cmdRaw pipes stdio to/from the socket. Used as an ssh ProxyCommand.
 func cmdRaw(args []string) {
@@ -213,8 +185,8 @@ func cmdExec(args []string) {
 	conn := dial(c)
 	defer conn.Close()
 
-	req := &protocol.Request{Version: protocol.Version, Op: protocol.OpExec, Exec: e}
-	if err := protocol.WriteRequest(conn, req); err != nil {
+	req := &vsockclient.Request{Version: vsockclient.Version, Op: vsockclient.OpExec, Exec: e}
+	if err := vsockclient.WriteRequest(conn, req); err != nil {
 		fatal("send request: %v", err)
 	}
 	if e.HasStdin {
@@ -223,8 +195,8 @@ func cmdExec(args []string) {
 	os.Exit(readResponses(conn, false))
 }
 
-func parseExec(args []string) (*protocol.Exec, error) {
-	e := &protocol.Exec{}
+func parseExec(args []string) (*vsockclient.Exec, error) {
+	e := &vsockclient.Exec{}
 	var argv []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -265,7 +237,7 @@ func parseExec(args []string) (*protocol.Exec, error) {
 }
 
 // cmdSimple runs a no-payload op (ping/info) and reports the result.
-func cmdSimple(args []string, op protocol.Op) {
+func cmdSimple(args []string, op vsockclient.Op) {
 	c, rest, err := parseConn(args)
 	if err != nil {
 		fatal("%v", err)
@@ -275,11 +247,11 @@ func cmdSimple(args []string, op protocol.Op) {
 	}
 	conn := dial(c)
 	defer conn.Close()
-	req := &protocol.Request{Version: protocol.Version, Op: op}
-	if err := protocol.WriteRequest(conn, req); err != nil {
+	req := &vsockclient.Request{Version: vsockclient.Version, Op: op}
+	if err := vsockclient.WriteRequest(conn, req); err != nil {
 		fatal("send request: %v", err)
 	}
-	os.Exit(readResponses(conn, op == protocol.OpInfo))
+	os.Exit(readResponses(conn, op == vsockclient.OpInfo))
 }
 
 // streamStdin forwards this process's stdin to the command as stdin frames.
@@ -288,12 +260,12 @@ func streamStdin(conn net.Conn) {
 	for {
 		n, err := os.Stdin.Read(buf)
 		if n > 0 {
-			if werr := protocol.WriteFrame(conn, protocol.FrameStdin, buf[:n]); werr != nil {
+			if werr := vsockclient.WriteFrame(conn, vsockclient.FrameStdin, buf[:n]); werr != nil {
 				return
 			}
 		}
 		if err != nil {
-			protocol.WriteFrame(conn, protocol.FrameStdinEOF, nil)
+			vsockclient.WriteFrame(conn, vsockclient.FrameStdinEOF, nil)
 			return
 		}
 	}
@@ -304,28 +276,28 @@ func streamStdin(conn net.Conn) {
 // (it carries the InfoMessage JSON).
 func readResponses(conn net.Conn, infoMode bool) int {
 	for {
-		f, err := protocol.ReadFrame(conn)
+		f, err := vsockclient.ReadFrame(conn)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "vsock-connect: connection closed: %v\n", err)
 			return 1
 		}
 		switch f.Type {
-		case protocol.FrameStdout:
+		case vsockclient.FrameStdout:
 			os.Stdout.Write(f.Payload)
 			if infoMode {
 				os.Stdout.Write([]byte("\n"))
 			}
-		case protocol.FrameStderr:
+		case vsockclient.FrameStderr:
 			os.Stderr.Write(f.Payload)
-		case protocol.FrameError:
-			var em protocol.ErrorMessage
+		case vsockclient.FrameError:
+			var em vsockclient.ErrorMessage
 			if json.Unmarshal(f.Payload, &em) == nil {
 				fmt.Fprintf(os.Stderr, "vsock-connect: agent error: %s\n", em.Msg)
 			} else {
 				fmt.Fprintf(os.Stderr, "vsock-connect: agent error: %s\n", f.Payload)
 			}
-		case protocol.FrameExit:
-			var ex protocol.ExitMessage
+		case vsockclient.FrameExit:
+			var ex vsockclient.ExitMessage
 			_ = json.Unmarshal(f.Payload, &ex)
 			return ex.Code
 		}
