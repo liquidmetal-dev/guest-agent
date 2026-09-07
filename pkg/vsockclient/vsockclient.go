@@ -161,3 +161,17 @@ type bufConn struct {
 }
 
 func (b *bufConn) Read(p []byte) (int, error) { return b.r.Read(p) }
+
+// CloseWrite half-closes the write side, signalling EOF to the peer while
+// still allowing reads - used to tell the guest-agent "no more input" without
+// tearing down the whole connection. Both the production UDS path
+// (*net.UnixConn) and the --net tcp dev path (*net.TCPConn) support this; it
+// returns an error if the underlying conn doesn't.
+func (b *bufConn) CloseWrite() error {
+	cw, ok := b.Conn.(interface{ CloseWrite() error })
+	if !ok {
+		return fmt.Errorf("%T does not support half-close", b.Conn)
+	}
+
+	return cw.CloseWrite()
+}
