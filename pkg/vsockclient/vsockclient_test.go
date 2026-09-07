@@ -181,6 +181,10 @@ func TestDial_CloseWrite(t *testing.T) {
 			return
 		}
 		defer conn.Close()
+		if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			serverDone <- fmt.Errorf("set server conn deadline: %w", err)
+			return
+		}
 
 		r := bufio.NewReader(conn)
 		line, err := r.ReadString('\n')
