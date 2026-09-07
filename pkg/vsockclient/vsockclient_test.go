@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -155,6 +156,103 @@ func TestDial_UDSHandshakeRejectsLooseMatch(t *testing.T) {
 
 	if _, err := vsockclient.Dial(context.Background(), udsPath, port); err == nil {
 		t.Fatal("expected Dial to reject a non-exact \"OK\" handshake reply, got nil error")
+	}
+}
+
+func TestDial_CloseWrite(t *testing.T) {
+	dir := t.TempDir()
+	udsPath := filepath.Join(dir, "vm.vsock")
+
+	l, err := net.Listen("unix", udsPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	defer l.Close()
+
+	const port = 1024
+
+	serverDone := make(chan error, 1)
+
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			serverDone <- err
+
+			return
+		}
+		defer conn.Close()
+
+		r := bufio.NewReader(conn)
+		line, err := r.ReadString('\n')
+		if err != nil {
+			serverDone <- err
+
+			return
+		}
+		if strings.TrimSpace(line) != fmt.Sprintf("CONNECT %d", port) {
+			serverDone <- fmt.Errorf("unexpected connect line %q", line)
+
+			return
+		}
+		fmt.Fprintf(conn, "OK 0\n")
+
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(r, buf); err != nil {
+			serverDone <- fmt.Errorf("read ping: %w", err)
+
+			return
+		}
+		if string(buf) != "ping" {
+			serverDone <- fmt.Errorf("expected %q, got %q", "ping", buf)
+
+			return
+		}
+
+		// The client half-closed after "ping" - confirm we observe EOF here.
+		if _, err := r.Read(buf); err != io.EOF {
+			serverDone <- fmt.Errorf("expected io.EOF after client half-close, got %v", err)
+
+			return
+		}
+
+		// The read side being closed shouldn't stop us writing a reply.
+		if _, err := conn.Write([]byte("pong")); err != nil {
+			serverDone <- fmt.Errorf("write pong: %w", err)
+
+			return
+		}
+
+		serverDone <- nil
+	}()
+
+	conn, err := vsockclient.Dial(context.Background(), udsPath, port)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatalf("write ping: %v", err)
+	}
+
+	cw, ok := conn.(interface{ CloseWrite() error })
+	if !ok {
+		t.Fatalf("%T does not implement CloseWrite", conn)
+	}
+	if err := cw.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+
+	buf := make([]byte, 4)
+	if _, err := readFull(conn, buf); err != nil {
+		t.Fatalf("read pong: %v", err)
+	}
+	if string(buf) != "pong" {
+		t.Fatalf("expected %q, got %q", "pong", buf)
+	}
+
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server: %v", err)
 	}
 }
 
