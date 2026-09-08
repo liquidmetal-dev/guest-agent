@@ -192,6 +192,27 @@ func TestExecHeartbeats(t *testing.T) {
 	}
 }
 
+// TestExecHeartbeatsContinueAfterOutputRedirected covers a command that
+// closes its own stdout/stderr immediately (e.g. via `exec >/dev/null`)
+// while continuing to run: heartbeats must keep flowing until the process
+// itself exits, not stop as soon as the agent-facing pipes drain.
+func TestExecHeartbeatsContinueAfterOutputRedirected(t *testing.T) {
+	orig := heartbeatInterval
+	heartbeatInterval = 50 * time.Millisecond
+	defer func() { heartbeatInterval = orig }()
+
+	res := run(t, execReq(&protocol.Exec{
+		Cmd:   `exec >/dev/null 2>&1; sleep 1`,
+		Shell: true,
+	}))
+	if res.heartbeats < 2 {
+		t.Errorf("heartbeats = %d, want at least 2 even with output redirected away", res.heartbeats)
+	}
+	if res.code != 0 {
+		t.Errorf("code = %d, want 0", res.code)
+	}
+}
+
 func TestPing(t *testing.T) {
 	res := run(t, &protocol.Request{Version: protocol.Version, Op: protocol.OpPing})
 	if res.code != 0 {

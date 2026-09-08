@@ -101,6 +101,16 @@ func (a *Agent) runExec(ctx context.Context, conn net.Conn, e *protocol.Exec) {
 		close(pumpsDone)
 	}()
 
+	waitDone := make(chan struct{})
+	var waitErr error
+	go func() {
+		waitErr = cmd.Wait() // process exit, independent of pipe closure
+		close(waitDone)
+	}()
+
+	// Heartbeat until the process itself exits, not just until its pipes
+	// drain: a command can redirect stdout/stderr away (closing pumpsDone
+	// early) while still running for a long time.
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 heartbeatLoop:
@@ -108,12 +118,12 @@ heartbeatLoop:
 		select {
 		case <-ticker.C:
 			write(protocol.FrameHeartbeat, nil)
-		case <-pumpsDone:
+		case <-waitDone:
 			break heartbeatLoop
 		}
 	}
 
-	waitErr := cmd.Wait()
+	<-pumpsDone // pipes finish draining essentially immediately after exit
 	close(procDone)
 
 	wmu.Lock()

@@ -34,13 +34,14 @@ const (
 
 // Frame types carried on the control channel.
 const (
-	FrameRequest  FrameType = protocol.FrameRequest
-	FrameStdin    FrameType = protocol.FrameStdin
-	FrameStdinEOF FrameType = protocol.FrameStdinEOF
-	FrameStdout   FrameType = protocol.FrameStdout
-	FrameStderr   FrameType = protocol.FrameStderr
-	FrameExit     FrameType = protocol.FrameExit
-	FrameError    FrameType = protocol.FrameError
+	FrameRequest   FrameType = protocol.FrameRequest
+	FrameStdin     FrameType = protocol.FrameStdin
+	FrameStdinEOF  FrameType = protocol.FrameStdinEOF
+	FrameStdout    FrameType = protocol.FrameStdout
+	FrameStderr    FrameType = protocol.FrameStderr
+	FrameExit      FrameType = protocol.FrameExit
+	FrameError     FrameType = protocol.FrameError
+	FrameHeartbeat FrameType = protocol.FrameHeartbeat
 
 	MaxFrameSize = protocol.MaxFrameSize
 )
