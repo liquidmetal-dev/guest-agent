@@ -52,6 +52,17 @@ make vet            # go vet ./...
 - `CGO_ENABLED=0`; binaries are static.
 - Keep new code gofmt-clean and vet-clean; run `golangci-lint run` before pushing.
 
+## Commits & PRs
+
+- Conventional Commits required for commit messages and PR titles
+  (`type(scope): summary`, e.g. `feat:`, `fix:`, `ci:`, `build(deps):`, `docs:`,
+  `refactor:`, `test:`), matching existing history.
+- No agent footers — do not append `Co-Authored-By: Claude ...`, "Generated with
+  Claude Code", session links, or similar attribution to commit messages or PR
+  descriptions.
+- Commits must be signed (GPG or SSH signing configured, `git commit -S`). Do not
+  use `--no-gpg-sign`.
+
 ## CI
 
 - `.github/workflows/ci.yml` — runs on PRs: `build`, `lint`, `test` jobs.
