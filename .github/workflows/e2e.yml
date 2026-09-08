@@ -33,6 +33,8 @@ jobs:
 
       - name: Set up mise
         uses: jdx/mise-action@v4
+        with:
+          version: "2026.9.2"
 
       - name: Install host dependencies
         run: |
