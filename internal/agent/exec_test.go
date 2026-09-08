@@ -14,10 +14,11 @@ import (
 
 // result collects what a client observed from one control exchange.
 type result struct {
-	stdout string
-	stderr string
-	errMsg string
-	code   int
+	stdout     string
+	stderr     string
+	errMsg     string
+	code       int
+	heartbeats int
 }
 
 // run drives a single request through handleControl over net.Pipe. stdinFrames
@@ -62,6 +63,8 @@ func run(t *testing.T, req *protocol.Request, stdinFrames ...string) result {
 			res.stderr += string(f.Payload)
 		case protocol.FrameError:
 			res.errMsg += string(f.Payload)
+		case protocol.FrameHeartbeat:
+			res.heartbeats++
 		case protocol.FrameExit:
 			var ex protocol.ExitMessage
 			jsonMust(t, f.Payload, &ex)
@@ -172,6 +175,41 @@ func TestExecTimeoutKills(t *testing.T) {
 	// SIGTERM (15) -> 128+15 = 143.
 	if res.code != 143 {
 		t.Errorf("code = %d, want 143 (SIGTERM)", res.code)
+	}
+}
+
+func TestExecHeartbeats(t *testing.T) {
+	orig := heartbeatInterval
+	heartbeatInterval = 50 * time.Millisecond
+	defer func() { heartbeatInterval = orig }()
+
+	res := run(t, execReq(&protocol.Exec{Cmd: "sleep", Args: []string{"1"}}))
+	if res.heartbeats < 2 {
+		t.Errorf("heartbeats = %d, want at least 2 for a quiet 1s command", res.heartbeats)
+	}
+	if res.code != 0 {
+		t.Errorf("code = %d, want 0", res.code)
+	}
+}
+
+// TestExecHeartbeatsContinueAfterOutputRedirected covers a command that
+// closes its own stdout/stderr immediately (e.g. via `exec >/dev/null`)
+// while continuing to run: heartbeats must keep flowing until the process
+// itself exits, not stop as soon as the agent-facing pipes drain.
+func TestExecHeartbeatsContinueAfterOutputRedirected(t *testing.T) {
+	orig := heartbeatInterval
+	heartbeatInterval = 50 * time.Millisecond
+	defer func() { heartbeatInterval = orig }()
+
+	res := run(t, execReq(&protocol.Exec{
+		Cmd:   `exec >/dev/null 2>&1; sleep 1`,
+		Shell: true,
+	}))
+	if res.heartbeats < 2 {
+		t.Errorf("heartbeats = %d, want at least 2 even with output redirected away", res.heartbeats)
+	}
+	if res.code != 0 {
+		t.Errorf("code = %d, want 0", res.code)
 	}
 }
 

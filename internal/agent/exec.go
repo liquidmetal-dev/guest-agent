@@ -21,6 +21,10 @@ import (
 // killGrace is how long a process group gets after SIGTERM before SIGKILL.
 const killGrace = 5 * time.Second
 
+// heartbeatInterval is how often a FrameHeartbeat is emitted while a command
+// runs. A var (not const) so tests can shrink it.
+var heartbeatInterval = 5 * time.Second
+
 // runExec runs e and streams its stdin/stdout/stderr over conn, ending with an
 // exit frame. The child runs in its own process group so the whole tree is
 // reaped on timeout or host disconnect.
@@ -91,8 +95,35 @@ func (a *Agent) runExec(ctx context.Context, conn net.Conn, e *protocol.Exec) {
 	procDone := make(chan struct{})
 	go reap(execCtx, pgid, procDone)
 
-	pumps.Wait() // drain stdout/stderr (pipes close when the child exits)
-	waitErr := cmd.Wait()
+	pumpsDone := make(chan struct{})
+	go func() {
+		pumps.Wait() // drain stdout/stderr (pipes close when the child exits)
+		close(pumpsDone)
+	}()
+
+	waitDone := make(chan struct{})
+	var waitErr error
+	go func() {
+		waitErr = cmd.Wait() // process exit, independent of pipe closure
+		close(waitDone)
+	}()
+
+	// Heartbeat until the process itself exits, not just until its pipes
+	// drain: a command can redirect stdout/stderr away (closing pumpsDone
+	// early) while still running for a long time.
+	ticker := time.NewTicker(heartbeatInterval)
+	defer ticker.Stop()
+heartbeatLoop:
+	for {
+		select {
+		case <-ticker.C:
+			write(protocol.FrameHeartbeat, nil)
+		case <-waitDone:
+			break heartbeatLoop
+		}
+	}
+
+	<-pumpsDone // pipes finish draining essentially immediately after exit
 	close(procDone)
 
 	wmu.Lock()

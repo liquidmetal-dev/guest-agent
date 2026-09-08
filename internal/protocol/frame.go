@@ -35,6 +35,10 @@ const (
 	FrameExit
 	// FrameError carries a JSON ErrorMessage; usually followed by FrameExit.
 	FrameError
+	// FrameHeartbeat is an empty-payload liveness signal sent periodically
+	// while a command runs (agent -> host). Unrecognized by older clients,
+	// which safely ignore it.
+	FrameHeartbeat
 )
 
 // MaxFrameSize caps a single frame's payload to guard against bad allocations
@@ -109,6 +113,8 @@ func (t FrameType) String() string {
 		return "exit"
 	case FrameError:
 		return "error"
+	case FrameHeartbeat:
+		return "heartbeat"
 	default:
 		return fmt.Sprintf("unknown(%d)", uint8(t))
 	}
