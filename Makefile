@@ -5,7 +5,7 @@ GOFLAGS := CGO_ENABLED=0
 BINDIR := bin
 PLATFORMS := linux/amd64 linux/arm64
 
-.PHONY: all build host test e2e vet fmt lint clean release
+.PHONY: all build host test e2e vet fmt lint tools clean release
 
 all: build
 
@@ -36,6 +36,12 @@ lint: vet
 		printf '%s\n' "$$files"; \
 		exit 1; \
 	fi
+	golangci-lint run
+
+# Run once (or after mise.toml changes) to install pinned Go/golangci-lint/goreleaser via mise.
+tools:
+	@command -v mise >/dev/null 2>&1 || { echo "mise not found: https://mise.jdx.dev/getting-started.html"; exit 1; }
+	mise install
 
 # Static multi-arch release builds.
 release:

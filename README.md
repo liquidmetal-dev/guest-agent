@@ -39,6 +39,24 @@ make release    # linux/amd64 + linux/arm64 static binaries
 make test
 ```
 
+## Development
+
+This repo pins its Go toolchain and build tooling (Go, golangci-lint,
+goreleaser) via [mise](https://mise.jdx.dev). Install mise, then run:
+
+```sh
+mise install    # or: make tools
+```
+
+to put the correct `go`, `golangci-lint`, and `goreleaser` versions on your
+`PATH` for this repo. Then use the existing Makefile targets as usual:
+
+```sh
+make build   # build guest-agent + vsock-connect
+make test    # unit tests
+make lint    # vet + gofmt check + golangci-lint
+```
+
 ## Releases
 
 Tagged releases (`vX.Y.Z`) publish to
