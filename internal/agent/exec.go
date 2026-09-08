@@ -44,21 +44,35 @@ func (a *Agent) runExec(ctx context.Context, conn net.Conn, e *protocol.Exec) {
 		return
 	}
 
-	stdout, err := cmd.StdoutPipe()
+	// We wire stdout/stderr through our own os.Pipe() rather than
+	// cmd.StdoutPipe()/StderrPipe(): those pipes' read ends are auto-closed by
+	// cmd.Wait() once the child exits, which races the pump goroutines still
+	// draining them (Wait runs concurrently, below) and can drop output from
+	// fast-exiting, low-output children. Owning the pipes ourselves means only
+	// we control the read end's lifetime, so Wait() can't race it.
+	stdout, stdoutW, err := os.Pipe()
 	if err != nil {
 		protocol.WriteError(conn, "stdout pipe: "+err.Error())
 		protocol.WriteExit(conn, 126)
 		return
 	}
-	stderr, err := cmd.StderrPipe()
+	stderr, stderrW, err := os.Pipe()
 	if err != nil {
+		stdout.Close()
+		stdoutW.Close()
 		protocol.WriteError(conn, "stderr pipe: "+err.Error())
 		protocol.WriteExit(conn, 126)
 		return
 	}
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stderrW
 	var stdin io.WriteCloser
 	if e.HasStdin {
 		if stdin, err = cmd.StdinPipe(); err != nil {
+			stdout.Close()
+			stdoutW.Close()
+			stderr.Close()
+			stderrW.Close()
 			protocol.WriteError(conn, "stdin pipe: "+err.Error())
 			protocol.WriteExit(conn, 126)
 			return
@@ -66,11 +80,20 @@ func (a *Agent) runExec(ctx context.Context, conn net.Conn, e *protocol.Exec) {
 	}
 
 	if err := cmd.Start(); err != nil {
+		stdout.Close()
+		stdoutW.Close()
+		stderr.Close()
+		stderrW.Close()
 		protocol.WriteError(conn, "start: "+err.Error())
 		protocol.WriteExit(conn, 127)
 		return
 	}
 	pgid := cmd.Process.Pid // Setpgid makes the group id equal the child pid.
+
+	// Close our copies of the write ends now that the child holds its own:
+	// the read ends only see EOF once every writer, including ours, is gone.
+	stdoutW.Close()
+	stderrW.Close()
 
 	// Serialize frame writes: stdout/stderr pumps and the final exit frame all
 	// share conn.
@@ -124,6 +147,8 @@ heartbeatLoop:
 	}
 
 	<-pumpsDone // pipes finish draining essentially immediately after exit
+	stdout.Close()
+	stderr.Close()
 	close(procDone)
 
 	wmu.Lock()
