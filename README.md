@@ -4,6 +4,7 @@ A small agent that installs into a guest VM and lets the host control it over
 **vsock** — no guest network required. The host can:
 
 - **run commands** on the guest, with streamed stdin/stdout/stderr and faithful exit codes;
+- **copy files** into and out of the guest, with mode and owner, atomically;
 - **SSH into the guest over vsock**, proxied to the guest's local sshd.
 
 Built for the [LiquidMetal](https://github.com/liquidmetal-dev) stack (flintlock +
@@ -14,17 +15,20 @@ socket multiplexer.
 
 | Binary | Runs on | Purpose |
 |---|---|---|
-| `guest-agent` | guest VM | listens on `AF_VSOCK`; control port (exec/ping/info) + ssh proxy |
-| `vsock-connect` | host | does the UDS `CONNECT` handshake; ssh `ProxyCommand` + exec client |
+| `guest-agent` | guest VM | listens on `AF_VSOCK`; control port (exec/put/get/ping/info) + ssh proxy |
+| `vsock-connect` | host | does the UDS `CONNECT` handshake; ssh `ProxyCommand` + exec/put/get client |
 
 ## How it works
 
 `guest-agent` opens two vsock listeners:
 
 - **control** (default port `1024`) — a length-prefixed binary protocol. The host sends a
-  `request` frame (`exec` / `ping` / `info`); for `exec` it then streams `stdin` frames,
-  and the agent streams back `stdout` / `stderr` / `exit`. Commands run in their own
-  process group and are SIGTERM→SIGKILL reaped on timeout or host disconnect — no orphans.
+  `request` frame (`exec` / `put` / `get` / `ping` / `info`); for `exec` it then streams
+  `stdin` frames, and the agent streams back `stdout` / `stderr` / `exit`. Commands run in
+  their own process group and are SIGTERM→SIGKILL reaped on timeout or host disconnect —
+  no orphans. `put` streams `stdin` frames into a temporary file that is renamed into
+  place; `get` streams the file back as `stdout` frames; both end with a `file_info`
+  frame (size, mode, owner, mtime) before `exit`. `info` lists the supported ops.
 - **ssh** (default port `1025`) — a raw byte proxy to `127.0.0.1:22`. sshd owns all auth,
   PTY, and SFTP; the agent is a dumb pipe.
 

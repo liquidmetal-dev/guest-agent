@@ -53,11 +53,43 @@ fi
 
 Interactive programs (`top`, `vim`) are **not** for `exec` (no PTY) — use the ssh path.
 
+## Copy files
+
+```sh
+# copy a host file into the guest (mode copied from the host file)
+vsock-connect put --uds /run/flintlock/vm.vsock --port 1024 run.sh /opt/app/run.sh
+
+# write from stdin, with an explicit mode and owner (name or numeric id)
+echo "token" | vsock-connect put --uds /run/flintlock/vm.vsock --port 1024 --mode 0600 --owner ubuntu - /home/ubuntu/.token
+
+# create missing parent directories (0755, same owner as the file)
+vsock-connect put --uds /run/flintlock/vm.vsock --port 1024 --mkdir main.py /work/src/main.py
+
+# read a guest file to stdout
+vsock-connect get --uds /run/flintlock/vm.vsock --port 1024 /var/log/app.log
+
+# read a guest file into a host file (mode preserved)
+vsock-connect get --uds /run/flintlock/vm.vsock --port 1024 /work/out/result.json result.json
+```
+
+`put` writes to a temporary file beside the destination and renames it into place, so a
+reader in the guest never sees a partial file. Without `--mode` or `--owner`, an existing
+file keeps its mode and owner; a new file gets `0644` owned by root. Paths in the guest
+must be absolute. `get` serves regular files only; copy a directory with
+`exec -- tar` instead. `--timeout` bounds the whole transfer, as it does for `exec`.
+
+Both commands exit `0` on success. Any failure prints the agent's error (which includes
+the OS error text, e.g. `no such file or directory`) and exits `1`; a failed `get` into a
+host file removes that file.
+
+Agents older than the file operations answer `put` and `get` with `unknown op` and exit
+`1`. Check the `ops` list in `info` before relying on them.
+
 ## Liveness and inventory
 
 ```sh
 vsock-connect ping --uds /run/flintlock/vm.vsock --port 1024   # exit 0 if agent alive
-vsock-connect info --uds /run/flintlock/vm.vsock --port 1024   # version + uname + uptime
+vsock-connect info --uds /run/flintlock/vm.vsock --port 1024   # version + uname + uptime + ops
 ```
 
 ## SSH over vsock
@@ -92,5 +124,6 @@ guest-agent --net tcp --control-port 1024 --ssh-port 1025
 
 # terminal 2
 vsock-connect exec --tcp 127.0.0.1:1024 -- echo hello
+echo hi | vsock-connect put --tcp 127.0.0.1:1024 - /tmp/hi && vsock-connect get --tcp 127.0.0.1:1024 /tmp/hi
 ssh -o ProxyCommand="vsock-connect --tcp 127.0.0.1:1025" "$USER"@127.0.0.1
 ```
