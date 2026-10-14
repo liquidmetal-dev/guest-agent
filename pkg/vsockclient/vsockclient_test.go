@@ -288,3 +288,86 @@ func dialUntilReady(t *testing.T, addr string) net.Conn {
 		}
 	}
 }
+
+func TestDialTCP_PutGet(t *testing.T) {
+	controlPort := freePort(t)
+	sshPort := freePort(t)
+
+	a := agent.New(agent.Config{
+		Transport:   transport.Config{Kind: transport.TCP, Addr: "127.0.0.1"},
+		ControlPort: controlPort,
+		SSHPort:     sshPort,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- a.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("agent.Run: %v", err)
+		}
+	})
+
+	addr := fmt.Sprintf("127.0.0.1:%d", controlPort)
+	path := filepath.Join(t.TempDir(), "client.txt")
+	content := []byte("through the public client")
+
+	conn := dialUntilReady(t, addr)
+	req := &vsockclient.Request{Version: vsockclient.Version, Op: vsockclient.OpPut, Put: &vsockclient.Put{Path: path, Mode: 0o600}}
+	if err := vsockclient.WriteRequest(conn, req); err != nil {
+		t.Fatalf("write put request: %v", err)
+	}
+	if err := vsockclient.WriteFrame(conn, vsockclient.FrameStdin, content); err != nil {
+		t.Fatalf("write stdin: %v", err)
+	}
+	if err := vsockclient.WriteFrame(conn, vsockclient.FrameStdinEOF, nil); err != nil {
+		t.Fatalf("write stdin eof: %v", err)
+	}
+	code, _, info := readUntilExit(t, conn)
+	conn.Close()
+	if code != 0 || info == nil || info.Size != int64(len(content)) || info.Mode != 0o600 {
+		t.Fatalf("put: code=%d info=%+v", code, info)
+	}
+
+	conn = dialUntilReady(t, addr)
+	defer conn.Close()
+	req = &vsockclient.Request{Version: vsockclient.Version, Op: vsockclient.OpGet, Get: &vsockclient.Get{Path: path}}
+	if err := vsockclient.WriteRequest(conn, req); err != nil {
+		t.Fatalf("write get request: %v", err)
+	}
+	code, out, info := readUntilExit(t, conn)
+	if code != 0 || out != string(content) || info == nil || info.Size != int64(len(content)) {
+		t.Fatalf("get: code=%d out=%q info=%+v", code, out, info)
+	}
+}
+
+func readUntilExit(t *testing.T, conn net.Conn) (code int, stdout string, info *vsockclient.FileInfo) {
+	t.Helper()
+	for {
+		f, err := vsockclient.ReadFrame(conn)
+		if err != nil {
+			t.Fatalf("read frame: %v", err)
+		}
+		switch f.Type {
+		case vsockclient.FrameStdout:
+			stdout += string(f.Payload)
+		case vsockclient.FrameFileInfo:
+			var fi vsockclient.FileInfo
+			if err := json.Unmarshal(f.Payload, &fi); err != nil {
+				t.Fatalf("unmarshal file_info: %v", err)
+			}
+			info = &fi
+		case vsockclient.FrameError:
+			t.Logf("agent error: %s", f.Payload)
+		case vsockclient.FrameExit:
+			var ex vsockclient.ExitMessage
+			if err := json.Unmarshal(f.Payload, &ex); err != nil {
+				t.Fatalf("unmarshal exit: %v", err)
+			}
+			return ex.Code, stdout, info
+		}
+	}
+}
