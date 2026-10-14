@@ -19,11 +19,25 @@ type result struct {
 	errMsg     string
 	code       int
 	heartbeats int
+	fileInfo   *protocol.FileInfo
 }
 
-// run drives a single request through handleControl over net.Pipe. stdinFrames
-// (each a payload) are sent as FrameStdin, followed by FrameStdinEOF.
+// run drives a single request through handleControl over net.Pipe. For an
+// exec with HasStdin, or a put, stdinFrames (each a payload) are sent as
+// FrameStdin, followed by FrameStdinEOF.
 func run(t *testing.T, req *protocol.Request, stdinFrames ...string) result {
+	t.Helper()
+	return runFrames(t, req, true, stdinFrames...)
+}
+
+// runNoEOF is run without the trailing FrameStdinEOF, for tests that need the
+// agent to keep waiting for input.
+func runNoEOF(t *testing.T, req *protocol.Request, stdinFrames ...string) result {
+	t.Helper()
+	return runFrames(t, req, false, stdinFrames...)
+}
+
+func runFrames(t *testing.T, req *protocol.Request, sendEOF bool, stdinFrames ...string) result {
 	t.Helper()
 	client, server := net.Pipe()
 	a := New(Config{})
@@ -38,12 +52,14 @@ func run(t *testing.T, req *protocol.Request, stdinFrames ...string) result {
 	if err := protocol.WriteRequest(client, req); err != nil {
 		t.Fatalf("write request: %v", err)
 	}
-	if req.Exec != nil && req.Exec.HasStdin {
+	if (req.Exec != nil && req.Exec.HasStdin) || req.Put != nil {
 		go func() {
 			for _, s := range stdinFrames {
 				protocol.WriteFrame(client, protocol.FrameStdin, []byte(s))
 			}
-			protocol.WriteFrame(client, protocol.FrameStdinEOF, nil)
+			if sendEOF {
+				protocol.WriteFrame(client, protocol.FrameStdinEOF, nil)
+			}
 		}()
 	}
 
@@ -65,6 +81,10 @@ func run(t *testing.T, req *protocol.Request, stdinFrames ...string) result {
 			res.errMsg += string(f.Payload)
 		case protocol.FrameHeartbeat:
 			res.heartbeats++
+		case protocol.FrameFileInfo:
+			var fi protocol.FileInfo
+			jsonMust(t, f.Payload, &fi)
+			res.fileInfo = &fi
 		case protocol.FrameExit:
 			var ex protocol.ExitMessage
 			jsonMust(t, f.Payload, &ex)

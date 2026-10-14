@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -135,5 +137,64 @@ func TestSSHProxy(t *testing.T) {
 	}
 	if string(buf) != string(msg) {
 		t.Errorf("got %q, want %q", buf, msg)
+	}
+}
+
+// TestPutGetOverTCP runs put then get over the real transport so the conn
+// deadline handling is exercised on a socket rather than net.Pipe.
+func TestPutGetOverTCP(t *testing.T) {
+	control, _, stop := startAgent(t, "127.0.0.1:1")
+	defer stop()
+
+	path := filepath.Join(t.TempDir(), "tcp.txt")
+	content := strings.Repeat("tcp-put-get\n", 4000)
+
+	conn := dialUntilReady(t, control)
+	if err := protocol.WriteRequest(conn, putReq(&protocol.Put{Path: path, Mode: 0o600, TimeoutSec: 10})); err != nil {
+		t.Fatalf("write put request: %v", err)
+	}
+	if err := protocol.WriteFrame(conn, protocol.FrameStdin, []byte(content)); err != nil {
+		t.Fatalf("write stdin: %v", err)
+	}
+	if err := protocol.WriteFrame(conn, protocol.FrameStdinEOF, nil); err != nil {
+		t.Fatalf("write stdin eof: %v", err)
+	}
+	if code, _, info := readUntilExit(t, conn); code != 0 || info == nil || info.Size != int64(len(content)) {
+		t.Fatalf("put: code=%d info=%+v", code, info)
+	}
+	conn.Close()
+
+	conn = dialUntilReady(t, control)
+	defer conn.Close()
+	if err := protocol.WriteRequest(conn, getReq(&protocol.Get{Path: path, TimeoutSec: 10})); err != nil {
+		t.Fatalf("write get request: %v", err)
+	}
+	code, out, info := readUntilExit(t, conn)
+	if code != 0 || out != content || info == nil || info.Mode != 0o600 {
+		t.Fatalf("get: code=%d len(out)=%d info=%+v", code, len(out), info)
+	}
+}
+
+func readUntilExit(t *testing.T, conn net.Conn) (code int, stdout string, info *protocol.FileInfo) {
+	t.Helper()
+	for {
+		f, err := protocol.ReadFrame(conn)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		switch f.Type {
+		case protocol.FrameStdout:
+			stdout += string(f.Payload)
+		case protocol.FrameFileInfo:
+			var fi protocol.FileInfo
+			jsonMust(t, f.Payload, &fi)
+			info = &fi
+		case protocol.FrameError:
+			t.Logf("agent error: %s", f.Payload)
+		case protocol.FrameExit:
+			var ex protocol.ExitMessage
+			jsonMust(t, f.Payload, &ex)
+			return ex.Code, stdout, info
+		}
 	}
 }
