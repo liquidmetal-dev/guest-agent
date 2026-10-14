@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -80,15 +81,19 @@ func TestCloudHypervisorAgentE2E(t *testing.T) {
 	t.Run("info", func(t *testing.T) {
 		res := runVsock(t, vsockConnect, nil, "info", "--uds", vsockPath, "--port", controlPort)
 		var info struct {
-			Version string `json:"version"`
-			Uname   string `json:"uname"`
-			Uptime  string `json:"uptime"`
+			Version string   `json:"version"`
+			Uname   string   `json:"uname"`
+			Uptime  string   `json:"uptime"`
+			Ops     []string `json:"ops"`
 		}
 		if err := json.Unmarshal(bytes.TrimSpace(res.stdout), &info); err != nil {
 			t.Fatalf("info json: %v\nstdout=%s\nstderr=%s", err, res.stdout, res.stderr)
 		}
 		if info.Version == "" || info.Uname == "" || info.Uptime == "" {
 			t.Fatalf("incomplete info response: %+v", info)
+		}
+		if !slices.Contains(info.Ops, "put") || !slices.Contains(info.Ops, "get") {
+			t.Fatalf("info ops = %v, want put and get", info.Ops)
 		}
 	})
 
@@ -128,6 +133,50 @@ func TestCloudHypervisorAgentE2E(t *testing.T) {
 		}
 		if res.code != 143 {
 			t.Fatalf("exit code = %d, want 143\nstdout=%s\nstderr=%s", res.code, res.stdout, res.stderr)
+		}
+	})
+
+	t.Run("put file", func(t *testing.T) {
+		runVsock(t, vsockConnect, []byte("e2e-put-body"), "put", "--uds", vsockPath, "--port", controlPort, "--mode", "0600", "-", "/tmp/e2e-put.txt")
+		res := runVsock(t, vsockConnect, nil, "exec", "--uds", vsockPath, "--port", controlPort, "--", "cat", "/tmp/e2e-put.txt")
+		if got, want := string(res.stdout), "e2e-put-body"; got != want {
+			t.Fatalf("guest content = %q, want %q", got, want)
+		}
+		res = runVsock(t, vsockConnect, nil, "exec", "--uds", vsockPath, "--port", controlPort, "--", "stat", "-c", "%a", "/tmp/e2e-put.txt")
+		if got, want := strings.TrimSpace(string(res.stdout)), "600"; got != want {
+			t.Fatalf("guest mode = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("put mkdir parents", func(t *testing.T) {
+		runVsock(t, vsockConnect, []byte("nested"), "put", "--uds", vsockPath, "--port", controlPort, "--mkdir", "-", "/tmp/e2e/a/b/c.txt")
+		res := runVsock(t, vsockConnect, nil, "exec", "--uds", vsockPath, "--port", controlPort, "--", "cat", "/tmp/e2e/a/b/c.txt")
+		if got, want := string(res.stdout), "nested"; got != want {
+			t.Fatalf("guest content = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("get file", func(t *testing.T) {
+		runVsock(t, vsockConnect, nil, "exec", "--uds", vsockPath, "--port", controlPort, "--shell", "--", "printf e2e-get-body > /tmp/e2e-get.txt")
+
+		res := runVsock(t, vsockConnect, nil, "get", "--uds", vsockPath, "--port", controlPort, "/tmp/e2e-get.txt")
+		if got, want := string(res.stdout), "e2e-get-body"; got != want {
+			t.Fatalf("stdout = %q, want %q", got, want)
+		}
+
+		dest := filepath.Join(work, "got.txt")
+		runVsock(t, vsockConnect, nil, "get", "--uds", vsockPath, "--port", controlPort, "/tmp/e2e-get.txt", dest)
+		got, err := os.ReadFile(dest)
+		if err != nil {
+			t.Fatalf("read %s: %v", dest, err)
+		}
+		if string(got) != "e2e-get-body" {
+			t.Fatalf("host file = %q, want %q", got, "e2e-get-body")
+		}
+
+		res = runVsockAllowExit(t, vsockConnect, nil, "get", "--uds", vsockPath, "--port", controlPort, "/tmp")
+		if res.code != 1 || !strings.Contains(string(res.stderr), "is a directory") {
+			t.Fatalf("get /tmp: exit %d stderr=%s, want 1 and is a directory", res.code, res.stderr)
 		}
 	})
 
@@ -236,7 +285,7 @@ func buildInitramfs(t *testing.T, work, out, busybox, guestAgent, echoServer, ke
 	copyFile(t, guestAgent, filepath.Join(root, "usr/local/bin", "guest-agent"), 0o755)
 	copyFile(t, echoServer, filepath.Join(root, "usr/local/bin", "echo-server"), 0o755)
 
-	for _, applet := range []string{"sh", "cat", "echo", "sleep", "false", "uname", "id", "tee", "mount", "insmod", "ip", "ifconfig"} {
+	for _, applet := range []string{"sh", "cat", "echo", "sleep", "false", "uname", "id", "tee", "stat", "mount", "insmod", "ip", "ifconfig"} {
 		must(t, os.Symlink("busybox", filepath.Join(root, "bin", applet)))
 	}
 
