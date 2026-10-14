@@ -7,7 +7,7 @@
 //
 // The first frame on a connection is always a Request frame carrying a JSON
 // envelope (see messages.go). Subsequent frames stream stdin (host->agent) and
-// stdout/stderr/exit/error (agent->host).
+// stdout/stderr/file_info/exit/error (agent->host).
 package protocol
 
 import (
@@ -39,6 +39,10 @@ const (
 	// while a command runs (agent -> host). Unrecognized by older clients,
 	// which safely ignore it.
 	FrameHeartbeat
+	// FrameFileInfo carries a JSON FileInfo describing the file a put wrote or
+	// a get read (agent -> host). It is sent immediately before the exit frame
+	// of a successful put/get and never on failure. Older clients ignore it.
+	FrameFileInfo
 )
 
 // MaxFrameSize caps a single frame's payload to guard against bad allocations
@@ -115,6 +119,8 @@ func (t FrameType) String() string {
 		return "error"
 	case FrameHeartbeat:
 		return "heartbeat"
+	case FrameFileInfo:
+		return "file_info"
 	default:
 		return fmt.Sprintf("unknown(%d)", uint8(t))
 	}
