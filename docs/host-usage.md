@@ -79,8 +79,9 @@ must be absolute. `get` serves regular files only; copy a directory with
 `exec -- tar` instead. `--timeout` bounds the whole transfer, as it does for `exec`.
 
 Both commands exit `0` on success. Any failure prints the agent's error (which includes
-the OS error text, e.g. `no such file or directory`) and exits `1`; a failed `get` into a
-host file removes that file.
+the OS error text, e.g. `no such file or directory`) and exits `1`. `get` into a host file
+receives into a temporary file beside it and renames on success, so a failed `get` leaves
+an existing destination untouched.
 
 Agents older than the file operations answer `put` and `get` with `unknown op` and exit
 `1`. Check the `ops` list in `info` before relying on them.

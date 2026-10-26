@@ -250,7 +250,10 @@ func cmdPut(args []string) {
 		fatal("send request: %v", err)
 	}
 	go streamInput(conn, in)
-	code, _ := readFrames(conn, io.Discard, false)
+	code, _, err := readFrames(conn, io.Discard, false)
+	if err != nil {
+		fatal("%v", err)
+	}
 	os.Exit(code)
 }
 
@@ -320,38 +323,61 @@ func cmdGet(args []string) {
 		fatal("%v", err)
 	}
 
-	var out io.Writer = os.Stdout
-	var destFile *os.File
-	if dest != "" && dest != "-" {
-		destFile, err = os.Create(dest)
-		if err != nil {
-			fatal("%v", err)
-		}
-		out = destFile
-	}
-
 	conn := dial(c)
 	defer conn.Close()
-
-	req := &vsockclient.Request{Version: vsockclient.Version, Op: vsockclient.OpGet, Get: g}
-	if err := vsockclient.WriteRequest(conn, req); err != nil {
-		fatal("send request: %v", err)
-	}
-	code, info := readFrames(conn, out, false)
-	if destFile != nil {
-		if cerr := destFile.Close(); cerr != nil && code == 0 {
-			fatal("%v", cerr)
-		}
-		switch {
-		case code != 0:
-			os.Remove(dest) // a failed get leaves nothing behind
-		case info != nil:
-			if err := os.Chmod(dest, os.FileMode(info.Mode&0o777)); err != nil {
-				fatal("%v", err)
-			}
-		}
+	code, err := doGet(conn, g, dest)
+	if err != nil {
+		fatal("%v", err)
 	}
 	os.Exit(code)
+}
+
+// doGet sends the get request on conn and streams the reply to dest ("" or
+// "-" for stdout). A file dest is received into a temp file beside it and
+// renamed into place only after a successful transfer, so a failed get never
+// touches an existing dest. The returned code is the agent's exit code; a
+// non-nil error is a host-side failure (and then code is 1).
+func doGet(conn net.Conn, g *vsockclient.Get, dest string) (int, error) {
+	if dest == "" || dest == "-" {
+		if err := vsockclient.WriteRequest(conn, &vsockclient.Request{Version: vsockclient.Version, Op: vsockclient.OpGet, Get: g}); err != nil {
+			return 1, fmt.Errorf("send request: %w", err)
+		}
+		code, _, err := readFrames(conn, os.Stdout, false)
+		return code, err
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(dest), "."+filepath.Base(dest)+".*")
+	if err != nil {
+		return 1, err
+	}
+	committed := false
+	defer func() {
+		tmp.Close()
+		if !committed {
+			os.Remove(tmp.Name())
+		}
+	}()
+
+	if err := vsockclient.WriteRequest(conn, &vsockclient.Request{Version: vsockclient.Version, Op: vsockclient.OpGet, Get: g}); err != nil {
+		return 1, fmt.Errorf("send request: %w", err)
+	}
+	code, info, err := readFrames(conn, tmp, false)
+	if err != nil || code != 0 {
+		return code, err
+	}
+	if info != nil {
+		if err := tmp.Chmod(os.FileMode(info.Mode & 0o777)); err != nil {
+			return 1, err
+		}
+	}
+	if err := tmp.Close(); err != nil {
+		return 1, err
+	}
+	if err := os.Rename(tmp.Name(), dest); err != nil {
+		return 1, err
+	}
+	committed = true
+	return 0, nil
 }
 
 // parseGet parses get options and returns the request plus the host
@@ -480,25 +506,30 @@ func streamInput(conn net.Conn, r io.Reader) {
 // and returning the exit code. When infoMode, a stdout frame is reprinted as-is
 // (it carries the InfoMessage JSON).
 func readResponses(conn net.Conn, infoMode bool) int {
-	code, _ := readFrames(conn, os.Stdout, infoMode)
+	code, _, err := readFrames(conn, os.Stdout, infoMode)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "vsock-connect: %v\n", err)
+	}
 	return code
 }
 
 // readFrames is readResponses with stdout frames sent to w. It also returns
-// the file_info frame of a put/get, if one arrived.
-func readFrames(conn net.Conn, w io.Writer, infoMode bool) (int, *vsockclient.FileInfo) {
+// the file_info frame of a put/get, if one arrived. A conn read failure or a
+// failed or short write to w ends the exchange with code 1 and that error.
+func readFrames(conn net.Conn, w io.Writer, infoMode bool) (int, *vsockclient.FileInfo, error) {
 	var info *vsockclient.FileInfo
 	for {
 		f, err := vsockclient.ReadFrame(conn)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "vsock-connect: connection closed: %v\n", err)
-			return 1, info
+			return 1, info, fmt.Errorf("connection closed: %w", err)
 		}
 		switch f.Type {
 		case vsockclient.FrameStdout:
-			w.Write(f.Payload)
 			if infoMode {
-				w.Write([]byte("\n"))
+				f.Payload = append(f.Payload, '\n')
+			}
+			if err := writeAll(w, f.Payload); err != nil {
+				return 1, info, err
 			}
 		case vsockclient.FrameFileInfo:
 			var fi vsockclient.FileInfo
@@ -517,9 +548,21 @@ func readFrames(conn net.Conn, w io.Writer, infoMode bool) (int, *vsockclient.Fi
 		case vsockclient.FrameExit:
 			var ex vsockclient.ExitMessage
 			_ = json.Unmarshal(f.Payload, &ex)
-			return ex.Code, info
+			return ex.Code, info, nil
 		}
 	}
+}
+
+// writeAll writes p to w, treating a short write as an error.
+func writeAll(w io.Writer, p []byte) error {
+	n, err := w.Write(p)
+	if err == nil && n < len(p) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		return fmt.Errorf("write output: %w", err)
+	}
+	return nil
 }
 
 func fatal(format string, a ...any) {

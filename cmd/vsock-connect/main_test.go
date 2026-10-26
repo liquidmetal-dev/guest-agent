@@ -1,8 +1,16 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/liquidmetal-dev/guest-agent/pkg/vsockclient"
 )
 
 func TestParsePut(t *testing.T) {
@@ -92,5 +100,140 @@ func TestParseGetErrors(t *testing.T) {
 		if _, _, err := parseGet(args); err == nil {
 			t.Errorf("%s: parseGet(%v) = nil error", name, args)
 		}
+	}
+}
+
+// fakeAgent runs script on the server end of a pipe and returns the client
+// end. The script plays the agent side of one control exchange.
+func fakeAgent(t *testing.T, script func(conn net.Conn)) net.Conn {
+	t.Helper()
+	client, server := net.Pipe()
+	go func() {
+		script(server)
+		server.Close()
+	}()
+	return client
+}
+
+// readRequest consumes the opening request frame, as the agent would.
+func readRequest(t *testing.T, conn net.Conn) vsockclient.Request {
+	t.Helper()
+	f, err := vsockclient.ReadFrame(conn)
+	if err != nil {
+		t.Errorf("read request: %v", err)
+		return vsockclient.Request{}
+	}
+	var req vsockclient.Request
+	if err := json.Unmarshal(f.Payload, &req); err != nil {
+		t.Errorf("request json: %v", err)
+	}
+	return req
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("no space left on device") }
+
+type shortWriter struct{}
+
+func (shortWriter) Write(p []byte) (int, error) { return len(p) - 1, nil }
+
+func TestReadFramesWriteErrorFails(t *testing.T) {
+	for name, w := range map[string]io.Writer{"error": failWriter{}, "short": shortWriter{}} {
+		t.Run(name, func(t *testing.T) {
+			conn := fakeAgent(t, func(c net.Conn) {
+				vsockclient.WriteFrame(c, vsockclient.FrameStdout, []byte("abc"))
+				vsockclient.WriteExit(c, 0)
+			})
+			defer conn.Close()
+
+			code, _, err := readFrames(conn, w, false)
+
+			if code != 1 || err == nil {
+				t.Errorf("code = %d err = %v, want 1 and a write error", code, err)
+			}
+		})
+	}
+}
+
+func TestDoGetFailureKeepsExistingDest(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "out.txt")
+	if err := os.WriteFile(dest, []byte("keep me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	conn := fakeAgent(t, func(c net.Conn) {
+		readRequest(t, c)
+		vsockclient.WriteError(c, "get: open /nope: no such file or directory")
+		vsockclient.WriteExit(c, 1)
+	})
+	defer conn.Close()
+
+	code, err := doGet(conn, &vsockclient.Get{Path: "/nope"}, dest)
+
+	if code != 1 || err != nil {
+		t.Errorf("code = %d err = %v, want 1 and no local error", code, err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != "keep me" {
+		t.Errorf("dest = %q, want the original content untouched", got)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Errorf("dir has %d entries, want only out.txt (no temp file left)", len(ents))
+	}
+}
+
+func TestDoGetWriteErrorRemovesTemp(t *testing.T) {
+	dir := t.TempDir()
+	conn := fakeAgent(t, func(c net.Conn) {
+		readRequest(t, c)
+		vsockclient.WriteFrame(c, vsockclient.FrameStdout, []byte("abc"))
+		vsockclient.WriteExit(c, 0)
+	})
+	defer conn.Close()
+
+	// A directory as DEST makes the temp file creation fail up front.
+	code, err := doGet(conn, &vsockclient.Get{Path: "/f"}, filepath.Join(dir, "missing", "out"))
+
+	if code != 1 || err == nil {
+		t.Errorf("code = %d err = %v, want 1 and an error", code, err)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+		t.Errorf("dir entries = %v, want none", ents)
+	}
+}
+
+func TestDoGetSuccessRenamesAndAppliesMode(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "out.txt")
+	if err := os.WriteFile(dest, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	conn := fakeAgent(t, func(c net.Conn) {
+		req := readRequest(t, c)
+		if req.Op != vsockclient.OpGet || req.Get == nil || req.Get.Path != "/f" {
+			t.Errorf("request = %+v, want get /f", req)
+		}
+		vsockclient.WriteFrame(c, vsockclient.FrameStdout, []byte("new "))
+		vsockclient.WriteFrame(c, vsockclient.FrameStdout, []byte("content"))
+		vsockclient.WriteFileInfo(c, vsockclient.FileInfo{Size: 11, Mode: 0o640})
+		vsockclient.WriteExit(c, 0)
+	})
+	defer conn.Close()
+
+	code, err := doGet(conn, &vsockclient.Get{Path: "/f"}, dest)
+
+	if code != 0 || err != nil {
+		t.Fatalf("code = %d err = %v, want 0 and nil", code, err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != "new content" {
+		t.Errorf("dest = %q, want %q", got, "new content")
+	}
+	if fi, _ := os.Stat(dest); fi.Mode().Perm() != 0o640 {
+		t.Errorf("mode = %o, want 640 from file_info", fi.Mode().Perm())
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Errorf("dir has %d entries, want only out.txt", len(ents))
 	}
 }
