@@ -180,6 +180,28 @@ func TestCloudHypervisorAgentE2E(t *testing.T) {
 		}
 	})
 
+	t.Run("get failure keeps host file", func(t *testing.T) {
+		dest := filepath.Join(work, "keep.txt")
+		if err := os.WriteFile(dest, []byte("keep me"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		res := runVsockAllowExit(t, vsockConnect, nil, "get", "--uds", vsockPath, "--port", controlPort, "/tmp/e2e-missing.txt", dest)
+		if res.code != 1 || !strings.Contains(string(res.stderr), "no such file or directory") {
+			t.Fatalf("get missing: exit %d stderr=%s, want 1 and ENOENT", res.code, res.stderr)
+		}
+		got, err := os.ReadFile(dest)
+		if err != nil || string(got) != "keep me" {
+			t.Fatalf("host file after failed get = %q (err %v), want %q untouched", got, err, "keep me")
+		}
+		ents, _ := os.ReadDir(work)
+		for _, e := range ents {
+			if strings.HasPrefix(e.Name(), ".keep.txt.") {
+				t.Fatalf("temp file %s left behind", e.Name())
+			}
+		}
+	})
+
 	t.Run("ssh proxy raw bytes", func(t *testing.T) {
 		runRawProxy(t, vsockConnect, vsockPath, []byte("raw-proxy-check"))
 	})
