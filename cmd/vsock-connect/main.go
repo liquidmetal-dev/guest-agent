@@ -209,7 +209,14 @@ func cmdExec(args []string) {
 		fatal("send request: %v", err)
 	}
 	if e.HasStdin {
-		go streamInput(conn, os.Stdin)
+		// Like `cat SRC | cmd`: a stdin read error is reported, and the
+		// command still sees end of input.
+		go func() {
+			if err := streamInput(conn, os.Stdin); err != nil {
+				fmt.Fprintf(os.Stderr, "vsock-connect: read stdin: %v\n", err)
+				vsockclient.WriteFrame(conn, vsockclient.FrameStdinEOF, nil)
+			}
+		}()
 	}
 	os.Exit(readResponses(conn, false))
 }
@@ -225,36 +232,75 @@ func cmdPut(args []string) {
 		fatal("%v", err)
 	}
 
-	in := os.Stdin
-	if src != "-" {
-		f, err := os.Open(src)
+	in, err := openSource(src)
+	if err != nil {
+		fatal("%v", err)
+	}
+	defer in.Close()
+	if f, ok := in.(*os.File); ok && p.Mode == 0 && in != os.Stdin {
+		fi, err := f.Stat()
 		if err != nil {
 			fatal("%v", err)
 		}
-		defer f.Close()
-		if p.Mode == 0 {
-			fi, err := f.Stat()
-			if err != nil {
-				fatal("%v", err)
-			}
-			p.Mode = uint32(fi.Mode().Perm())
-		}
-		in = f
+		p.Mode = uint32(fi.Mode().Perm())
 	}
 
 	conn := dial(c)
 	defer conn.Close()
-
-	req := &vsockclient.Request{Version: vsockclient.Version, Op: vsockclient.OpPut, Put: p}
-	if err := vsockclient.WriteRequest(conn, req); err != nil {
-		fatal("send request: %v", err)
-	}
-	go streamInput(conn, in)
-	code, _, err := readFrames(conn, io.Discard, false)
+	code, err := doPut(conn, p, in, src)
 	if err != nil {
 		fatal("%v", err)
 	}
 	os.Exit(code)
+}
+
+// doPut sends the put request on conn and streams in as its content. A read
+// error on in aborts the put: the conn is closed without stdin_eof so the
+// agent discards its temp file, and the read error is reported. The returned
+// code is the agent's exit code; a non-nil error is a host-side failure (and
+// then code is 1).
+func doPut(conn net.Conn, p *vsockclient.Put, in io.Reader, src string) (int, error) {
+	req := &vsockclient.Request{Version: vsockclient.Version, Op: vsockclient.OpPut, Put: p}
+	if err := vsockclient.WriteRequest(conn, req); err != nil {
+		return 1, fmt.Errorf("send request: %w", err)
+	}
+	readErr := make(chan error, 1)
+	go func() {
+		if err := streamInput(conn, in); err != nil {
+			readErr <- err
+			conn.Close()
+		}
+	}()
+	code, _, err := readFrames(conn, io.Discard, false)
+	select {
+	case rerr := <-readErr:
+		return 1, fmt.Errorf("read %s: %w", src, rerr)
+	default:
+	}
+	return code, err
+}
+
+// openSource opens the put source: os.Stdin for "-", else the named file,
+// which must not be a directory (os.Open would accept one and the first read
+// would fail mid-transfer).
+func openSource(src string) (io.ReadCloser, error) {
+	if src == "-" {
+		return os.Stdin, nil
+	}
+	f, err := os.Open(src)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if fi.IsDir() {
+		f.Close()
+		return nil, fmt.Errorf("%s: is a directory", src)
+	}
+	return f, nil
 }
 
 // parsePut parses put options and returns the request plus the host source
@@ -485,19 +531,24 @@ func cmdSimple(args []string, op vsockclient.Op) {
 	os.Exit(readResponses(conn, op == vsockclient.OpInfo))
 }
 
-// streamInput forwards r to the agent as stdin frames, then a stdin_eof frame.
-func streamInput(conn net.Conn, r io.Reader) {
+// streamInput forwards r to the agent as stdin frames, then a stdin_eof frame
+// once r reaches EOF. Any other read error is returned without sending
+// stdin_eof, so the agent never takes a truncated stream for a complete one.
+func streamInput(conn net.Conn, r io.Reader) error {
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
 			if werr := vsockclient.WriteFrame(conn, vsockclient.FrameStdin, buf[:n]); werr != nil {
-				return
+				return nil // the agent is gone; readFrames reports it
 			}
 		}
-		if err != nil {
+		if err == io.EOF {
 			vsockclient.WriteFrame(conn, vsockclient.FrameStdinEOF, nil)
-			return
+			return nil
+		}
+		if err != nil {
+			return err
 		}
 	}
 }

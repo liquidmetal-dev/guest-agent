@@ -183,16 +183,13 @@ func TestDoGetFailureKeepsExistingDest(t *testing.T) {
 	}
 }
 
-func TestDoGetWriteErrorRemovesTemp(t *testing.T) {
+func TestDoGetTempCreateFailure(t *testing.T) {
 	dir := t.TempDir()
-	conn := fakeAgent(t, func(c net.Conn) {
-		readRequest(t, c)
-		vsockclient.WriteFrame(c, vsockclient.FrameStdout, []byte("abc"))
-		vsockclient.WriteExit(c, 0)
-	})
+	conn := fakeAgent(t, func(c net.Conn) { frameTypes(c) }) // never asked anything
 	defer conn.Close()
 
-	// A directory as DEST makes the temp file creation fail up front.
+	// A missing DEST directory makes the temp file creation fail before any
+	// request is sent.
 	code, err := doGet(conn, &vsockclient.Get{Path: "/f"}, filepath.Join(dir, "missing", "out"))
 
 	if code != 1 || err == nil {
@@ -235,5 +232,102 @@ func TestDoGetSuccessRenamesAndAppliesMode(t *testing.T) {
 	}
 	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
 		t.Errorf("dir has %d entries, want only out.txt", len(ents))
+	}
+}
+
+// errReader yields data once, then a non-EOF error, like reading a directory.
+type errReader struct {
+	data string
+	done bool
+}
+
+func (r *errReader) Read(p []byte) (int, error) {
+	if !r.done {
+		r.done = true
+		return copy(p, r.data), nil
+	}
+	return 0, errors.New("read /srcdir: is a directory")
+}
+
+// frameTypes collects the types of every frame readable on conn until it fails.
+func frameTypes(conn net.Conn) []vsockclient.FrameType {
+	var types []vsockclient.FrameType
+	for {
+		f, err := vsockclient.ReadFrame(conn)
+		if err != nil {
+			return types
+		}
+		types = append(types, f.Type)
+	}
+}
+
+func TestStreamInputReadErrorSendsNoEOF(t *testing.T) {
+	client, server := net.Pipe()
+	got := make(chan []vsockclient.FrameType, 1)
+	go func() { got <- frameTypes(server) }()
+
+	err := streamInput(client, &errReader{data: "abc"})
+	client.Close()
+
+	if err == nil || !strings.Contains(err.Error(), "is a directory") {
+		t.Errorf("err = %v, want the reader's error", err)
+	}
+	if types := <-got; len(types) != 1 || types[0] != vsockclient.FrameStdin {
+		t.Errorf("frames sent = %v, want only [stdin] and no stdin_eof", types)
+	}
+}
+
+func TestStreamInputEOFSendsEOF(t *testing.T) {
+	client, server := net.Pipe()
+	got := make(chan []vsockclient.FrameType, 1)
+	go func() { got <- frameTypes(server) }()
+
+	err := streamInput(client, strings.NewReader("abc"))
+	client.Close()
+
+	if err != nil {
+		t.Errorf("err = %v, want nil at EOF", err)
+	}
+	want := []vsockclient.FrameType{vsockclient.FrameStdin, vsockclient.FrameStdinEOF}
+	if types := <-got; len(types) != 2 || types[0] != want[0] || types[1] != want[1] {
+		t.Errorf("frames sent = %v, want %v", types, want)
+	}
+}
+
+func TestDoPutReportsSourceReadError(t *testing.T) {
+	var sawEOF bool
+	conn := fakeAgent(t, func(c net.Conn) {
+		readRequest(t, c)
+		for _, ft := range frameTypes(c) {
+			if ft == vsockclient.FrameStdinEOF {
+				sawEOF = true
+			}
+		}
+	})
+
+	code, err := doPut(conn, &vsockclient.Put{Path: "/dst"}, &errReader{data: "abc"}, "/srcdir")
+
+	if code != 1 || err == nil || !strings.Contains(err.Error(), "is a directory") {
+		t.Errorf("code = %d err = %v, want 1 and the source read error", code, err)
+	}
+	if err != nil && strings.Contains(err.Error(), "connection closed") {
+		t.Errorf("err = %v, should report the read error rather than the closed conn", err)
+	}
+	if sawEOF {
+		t.Error("agent received stdin_eof after a source read error")
+	}
+}
+
+func TestOpenSourceRejectsDirectory(t *testing.T) {
+	_, err := openSource(t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "is a directory") {
+		t.Errorf("err = %v, want an is a directory error", err)
+	}
+}
+
+func TestOpenSourceStdin(t *testing.T) {
+	r, err := openSource("-")
+	if err != nil || r != os.Stdin {
+		t.Errorf("r = %v err = %v, want os.Stdin", r, err)
 	}
 }
