@@ -30,6 +30,8 @@ const (
 	OpExec Op = protocol.OpExec
 	OpPing Op = protocol.OpPing
 	OpInfo Op = protocol.OpInfo
+	OpPut  Op = protocol.OpPut
+	OpGet  Op = protocol.OpGet
 )
 
 // Frame types carried on the control channel.
@@ -42,6 +44,7 @@ const (
 	FrameExit      FrameType = protocol.FrameExit
 	FrameError     FrameType = protocol.FrameError
 	FrameHeartbeat FrameType = protocol.FrameHeartbeat
+	FrameFileInfo  FrameType = protocol.FrameFileInfo
 
 	MaxFrameSize = protocol.MaxFrameSize
 )
@@ -54,6 +57,9 @@ type (
 	Frame        = protocol.Frame
 	Request      = protocol.Request
 	Exec         = protocol.Exec
+	Put          = protocol.Put
+	Get          = protocol.Get
+	FileInfo     = protocol.FileInfo
 	ExitMessage  = protocol.ExitMessage
 	ErrorMessage = protocol.ErrorMessage
 	InfoMessage  = protocol.InfoMessage
@@ -75,6 +81,11 @@ func WriteExit(w interface{ Write([]byte) (int, error) }, code int) error {
 // WriteError encodes msg as a FrameError on w.
 func WriteError(w interface{ Write([]byte) (int, error) }, msg string) error {
 	return protocol.WriteError(w, msg)
+}
+
+// WriteFileInfo encodes fi as a FrameFileInfo on w.
+func WriteFileInfo(w interface{ Write([]byte) (int, error) }, fi FileInfo) error {
+	return protocol.WriteFileInfo(w, fi)
 }
 
 // WriteFrame encodes one frame to w.

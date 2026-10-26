@@ -19,6 +19,15 @@ var Version = "dev"
 // startTime is captured at process start to report uptime in OpInfo.
 var startTime = time.Now()
 
+// supportedOps is advertised in OpInfo so a host can detect an older agent.
+var supportedOps = []string{
+	string(protocol.OpExec),
+	string(protocol.OpPing),
+	string(protocol.OpInfo),
+	string(protocol.OpPut),
+	string(protocol.OpGet),
+}
+
 // handleControl reads the opening Request frame and dispatches by op.
 func (a *Agent) handleControl(ctx context.Context, conn net.Conn) {
 	f, err := protocol.ReadFrame(conn)
@@ -56,6 +65,20 @@ func (a *Agent) handleControl(ctx context.Context, conn net.Conn) {
 			return
 		}
 		a.runExec(ctx, conn, req.Exec)
+	case protocol.OpPut:
+		if req.Put == nil {
+			protocol.WriteError(conn, "put op missing put payload")
+			protocol.WriteExit(conn, 1)
+			return
+		}
+		a.runPut(ctx, conn, req.Put)
+	case protocol.OpGet:
+		if req.Get == nil {
+			protocol.WriteError(conn, "get op missing get payload")
+			protocol.WriteExit(conn, 1)
+			return
+		}
+		a.runGet(ctx, conn, req.Get)
 	default:
 		protocol.WriteError(conn, fmt.Sprintf("unknown op %q", req.Op))
 		protocol.WriteExit(conn, 1)
@@ -68,6 +91,7 @@ func (a *Agent) handleInfo(conn net.Conn) {
 		Version: Version,
 		Uname:   unameString(),
 		Uptime:  time.Since(startTime).Round(time.Second).String(),
+		Ops:     supportedOps,
 	}
 	b, _ := json.Marshal(info)
 	if err := protocol.WriteFrame(conn, protocol.FrameStdout, b); err != nil {

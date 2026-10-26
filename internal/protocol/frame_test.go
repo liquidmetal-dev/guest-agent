@@ -17,6 +17,7 @@ func TestFrameRoundTrip(t *testing.T) {
 		{FrameStdout, []byte("hello world")},
 		{FrameStdinEOF, nil},
 		{FrameExit, []byte(`{"code":0}`)},
+		{FrameFileInfo, []byte(`{"size":1,"mode":420}`)},
 	}
 	var buf bytes.Buffer
 	for _, c := range cases {
@@ -59,5 +60,22 @@ func TestReadFrameTooLarge(t *testing.T) {
 	binary.BigEndian.PutUint32(hdr[1:], MaxFrameSize+1)
 	if _, err := ReadFrame(bytes.NewReader(hdr[:])); !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("err = %v, want ErrFrameTooLarge", err)
+	}
+}
+
+func TestFrameTypeString(t *testing.T) {
+	cases := []struct {
+		typ  FrameType
+		want string
+	}{
+		{FrameRequest, "request"},
+		{FrameHeartbeat, "heartbeat"},
+		{FrameFileInfo, "file_info"},
+		{FrameType(42), "unknown(42)"},
+	}
+	for _, c := range cases {
+		if got := c.typ.String(); got != c.want {
+			t.Errorf("FrameType(%d).String() = %q, want %q", uint8(c.typ), got, c.want)
+		}
 	}
 }
