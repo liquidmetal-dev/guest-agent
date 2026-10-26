@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -356,22 +357,7 @@ func TestPutAgentShutdown(t *testing.T) {
 	}
 	cancel()
 
-	var errMsg string
-	code := -1
-	for code < 0 {
-		f, err := protocol.ReadFrame(client)
-		if err != nil {
-			t.Fatalf("read: %v", err)
-		}
-		switch f.Type {
-		case protocol.FrameError:
-			errMsg += string(f.Payload)
-		case protocol.FrameExit:
-			var ex protocol.ExitMessage
-			jsonMust(t, f.Payload, &ex)
-			code = ex.Code
-		}
-	}
+	code, errMsg := readExit(t, client)
 	client.Close()
 	<-done
 
@@ -471,5 +457,119 @@ func TestInfoListsOps(t *testing.T) {
 	}
 	if strings.Join(supportedOps, ",") != strings.Join(want, ",") {
 		t.Errorf("supportedOps = %v, want %v", supportedOps, want)
+	}
+}
+
+// readExit drains agent frames on client until exit, returning the exit code
+// and the concatenated error text.
+func readExit(t *testing.T, client net.Conn) (code int, errMsg string) {
+	t.Helper()
+	for {
+		f, err := protocol.ReadFrame(client)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		switch f.Type {
+		case protocol.FrameError:
+			errMsg += string(f.Payload)
+		case protocol.FrameExit:
+			var ex protocol.ExitMessage
+			jsonMust(t, f.Payload, &ex)
+			return ex.Code, errMsg
+		}
+	}
+}
+
+// cancelConn cancels a context once a given number of bytes has been read
+// from, or written to, the wrapped conn. It lets a test end the handler
+// context at a precise point in the exchange.
+type cancelConn struct {
+	net.Conn
+	readLeft  int
+	writeLeft int
+	cancel    func()
+}
+
+func (c *cancelConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if c.readLeft > 0 {
+		if c.readLeft -= n; c.readLeft <= 0 {
+			c.cancel()
+		}
+	}
+	return n, err
+}
+
+func (c *cancelConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	if c.writeLeft > 0 {
+		if c.writeLeft -= n; c.writeLeft <= 0 {
+			c.cancel()
+		}
+	}
+	return n, err
+}
+
+func TestPutCancelledAfterEOFIsNotCommitted(t *testing.T) {
+	dir := t.TempDir()
+	var wire bytes.Buffer
+	if err := protocol.WriteRequest(&wire, putReq(&protocol.Put{Path: filepath.Join(dir, "f")})); err != nil {
+		t.Fatal(err)
+	}
+	protocol.WriteFrame(&wire, protocol.FrameStdin, []byte("data"))
+	protocol.WriteFrame(&wire, protocol.FrameStdinEOF, nil)
+
+	// The context ends as the agent reads the last byte of stdin_eof, i.e.
+	// after the content arrived but before the file can be committed.
+	ctx, cancel := context.WithCancel(context.Background())
+	client, server := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		New(Config{}).handleControl(ctx, &cancelConn{Conn: server, readLeft: wire.Len(), cancel: cancel})
+		server.Close()
+		close(done)
+	}()
+	go client.Write(wire.Bytes())
+
+	code, errMsg := readExit(t, client)
+	client.Close()
+	<-done
+
+	if code != 1 || !strings.Contains(errMsg, "shutting down") {
+		t.Errorf("code = %d err = %q, want 1 and a shutting down error", code, errMsg)
+	}
+	if ents := dirEntries(t, dir); len(ents) != 0 {
+		t.Errorf("dir entries = %v, want none (file must not be committed after cancellation)", ents)
+	}
+}
+
+func TestGetCancelledBeforeFinishReportsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(path, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var wire bytes.Buffer
+	protocol.WriteFrame(&wire, protocol.FrameStdout, []byte("payload"))
+
+	// The context ends as the agent writes the last content byte: the data
+	// is all out, but the op is over its time and must say so.
+	ctx, cancel := context.WithCancel(context.Background())
+	client, server := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		New(Config{}).handleControl(ctx, &cancelConn{Conn: server, writeLeft: wire.Len(), cancel: cancel})
+		server.Close()
+		close(done)
+	}()
+	if err := protocol.WriteRequest(client, getReq(&protocol.Get{Path: path})); err != nil {
+		t.Fatal(err)
+	}
+
+	code, errMsg := readExit(t, client)
+	client.Close()
+	<-done
+
+	if code != 1 || !strings.Contains(errMsg, "shutting down") {
+		t.Errorf("code = %d err = %q, want 1 and a shutting down error", code, errMsg)
 	}
 }

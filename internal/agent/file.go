@@ -35,6 +35,7 @@ type fileOp struct {
 	conn      net.Conn
 	cancel    context.CancelFunc
 	stopAfter func() bool
+	fired     chan struct{} // closed once the AfterFunc has set the deadline
 }
 
 func newFileOp(ctx context.Context, conn net.Conn, timeoutSec int) *fileOp {
@@ -45,23 +46,28 @@ func newFileOp(ctx context.Context, conn net.Conn, timeoutSec int) *fileOp {
 		prev := cancel
 		cancel = func() { stop(); prev() }
 	}
-	o := &fileOp{ctx: opCtx, conn: conn, cancel: cancel}
-	o.stopAfter = context.AfterFunc(opCtx, func() { conn.SetDeadline(time.Now()) })
+	o := &fileOp{ctx: opCtx, conn: conn, cancel: cancel, fired: make(chan struct{})}
+	o.stopAfter = context.AfterFunc(opCtx, func() {
+		conn.SetDeadline(time.Now())
+		close(o.fired)
+	})
 	return o
 }
 
 // finish sends the outcome of the op to the host and releases the op.
 func (o *fileOp) finish(a *Agent, op string, info *protocol.FileInfo, err error) {
-	o.stopAfter()
+	// If the AfterFunc has started, wait for it so its deadline cannot land
+	// after the clear below and swallow the reply.
+	if !o.stopAfter() {
+		<-o.fired
+	}
 	defer o.cancel()
 	o.conn.SetDeadline(time.Time{})
 
+	// A context that ended before the reply is reported even when the file
+	// work itself succeeded: the op is over its time, and for a put the file
+	// may or may not have been committed (there is no un-rename).
 	switch {
-	case err == nil:
-		if werr := protocol.WriteFileInfo(o.conn, *info); werr != nil {
-			return
-		}
-		protocol.WriteExit(o.conn, 0)
 	case o.ctx.Err() != nil:
 		msg := "timeout"
 		if !errors.Is(o.ctx.Err(), context.DeadlineExceeded) {
@@ -71,6 +77,11 @@ func (o *fileOp) finish(a *Agent, op string, info *protocol.FileInfo, err error)
 		o.conn.SetDeadline(time.Now().Add(killGrace))
 		protocol.WriteError(o.conn, op+": "+msg)
 		protocol.WriteExit(o.conn, 1)
+	case err == nil:
+		if werr := protocol.WriteFileInfo(o.conn, *info); werr != nil {
+			return
+		}
+		protocol.WriteExit(o.conn, 0)
 	case errors.Is(err, errHostGone):
 		a.log.Debug(op+": host disconnected", "error", err)
 	default:
@@ -164,6 +175,11 @@ func (o *fileOp) put(p *protocol.Put) (*protocol.FileInfo, error) {
 		}
 	}
 
+	// Content is complete; do not commit it if the op has already ended.
+	if err := o.ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// chown first: it clears setuid/setgid bits, which chmod then restores.
 	if uid >= 0 || gid >= 0 {
 		if err := tmp.Chown(uid, gid); err != nil {
@@ -177,6 +193,10 @@ func (o *fileOp) put(p *protocol.Put) (*protocol.FileInfo, error) {
 		return nil, err
 	}
 	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+	// Sync can be slow; check once more right before the rename commits.
+	if err := o.ctx.Err(); err != nil {
 		return nil, err
 	}
 	if err := os.Rename(tmp.Name(), p.Path); err != nil {
