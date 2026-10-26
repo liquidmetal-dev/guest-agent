@@ -56,8 +56,11 @@ Interactive programs (`top`, `vim`) are **not** for `exec` (no PTY) — use the 
 ## Copy files
 
 ```sh
-# copy a host file into the guest (mode copied from the host file)
+# copy a host file into the guest (an existing file keeps its mode, a new one gets 0644)
 vsock-connect put --uds /run/flintlock/vm.vsock --port 1024 run.sh /opt/app/run.sh
+
+# make it executable
+vsock-connect put --uds /run/flintlock/vm.vsock --port 1024 --mode 0755 run.sh /opt/app/run.sh
 
 # write from stdin, with an explicit mode and owner (name or numeric id)
 echo "token" | vsock-connect put --uds /run/flintlock/vm.vsock --port 1024 --mode 0600 --owner ubuntu - /home/ubuntu/.token

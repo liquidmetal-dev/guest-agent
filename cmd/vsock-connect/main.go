@@ -70,7 +70,7 @@ exec opts:
   --stdin            stream this process's stdin to the command
 
 put opts:
-  --mode OCTAL       permission bits (default: SRC's mode; for stdin the agent's default)
+  --mode OCTAL       permission bits (default: an existing file keeps its mode, else 0644)
   --owner U[:G]      owner as a name or numeric id (default: existing file's, else root)
   --mkdir            create missing parent directories
   --timeout N        abort after N seconds (0 = unbounded)
@@ -227,23 +227,11 @@ func cmdPut(args []string) {
 	if err != nil {
 		fatal("%v", err)
 	}
-	p, src, err := parsePut(rest)
-	if err != nil {
-		fatal("%v", err)
-	}
-
-	in, err := openSource(src)
+	p, in, src, err := preparePut(rest)
 	if err != nil {
 		fatal("%v", err)
 	}
 	defer in.Close()
-	if f, ok := in.(*os.File); ok && p.Mode == 0 && in != os.Stdin {
-		fi, err := f.Stat()
-		if err != nil {
-			fatal("%v", err)
-		}
-		p.Mode = uint32(fi.Mode().Perm())
-	}
 
 	conn := dial(c)
 	defer conn.Close()
@@ -278,6 +266,22 @@ func doPut(conn net.Conn, p *vsockclient.Put, in io.Reader, src string) (int, er
 	default:
 	}
 	return code, err
+}
+
+// preparePut parses put arguments and opens the source. It returns the
+// request, the source reader and the source name as given. The host file's
+// mode is deliberately not sent: without --mode the agent keeps an existing
+// file's mode and gives a new one 0644.
+func preparePut(args []string) (*vsockclient.Put, io.ReadCloser, string, error) {
+	p, src, err := parsePut(args)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	in, err := openSource(src)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return p, in, src, nil
 }
 
 // openSource opens the put source: os.Stdin for "-", else the named file,

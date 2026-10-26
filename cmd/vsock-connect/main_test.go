@@ -331,3 +331,40 @@ func TestOpenSourceStdin(t *testing.T) {
 		t.Errorf("r = %v err = %v, want os.Stdin", r, err)
 	}
 }
+
+func TestPreparePutFileSourceSendsNoMode(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "run.sh")
+	if err := os.WriteFile(src, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	p, in, _, err := preparePut([]string{src, "/opt/run.sh"})
+	if err != nil {
+		t.Fatalf("preparePut: %v", err)
+	}
+	defer in.Close()
+
+	if p.Mode != 0 {
+		t.Errorf("mode = %o, want 0 so the agent keeps an existing file's mode (or applies 0644)", p.Mode)
+	}
+	if p.Path != "/opt/run.sh" {
+		t.Errorf("path = %q", p.Path)
+	}
+}
+
+func TestPreparePutExplicitMode(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p, in, _, err := preparePut([]string{"--mode", "0755", src, "/dst"})
+	if err != nil {
+		t.Fatalf("preparePut: %v", err)
+	}
+	defer in.Close()
+
+	if p.Mode != 0o755 {
+		t.Errorf("mode = %o, want 755 from --mode", p.Mode)
+	}
+}
