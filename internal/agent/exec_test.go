@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -109,6 +110,22 @@ func TestExecStdout(t *testing.T) {
 	}
 	if res.code != 0 {
 		t.Errorf("code = %d, want 0", res.code)
+	}
+}
+
+// TestExecStdoutSingleProc pins the fix for #17/#22. With one scheduler thread,
+// as on a 1-vCPU guest, the old cmd.StdoutPipe()-based code let cmd.Wait() close
+// the read end before pump had read a fast child's output, returning exit 0 with
+// empty stdout. Owning the pipes via os.Pipe() rules that out; on the old code
+// this loop fails within a few dozen iterations.
+func TestExecStdoutSingleProc(t *testing.T) {
+	old := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(old)
+	for i := 0; i < 300; i++ {
+		res := run(t, execReq(&protocol.Exec{Cmd: "echo", Args: []string{"hello"}}))
+		if res.stdout != "hello\n" || res.code != 0 {
+			t.Fatalf("iteration %d: stdout = %q, code = %d; want %q, 0", i, res.stdout, res.code, "hello\n")
+		}
 	}
 }
 
